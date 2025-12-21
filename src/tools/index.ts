@@ -1248,7 +1248,11 @@ export const additionalToolDefinitions = [
       type: "object",
       properties: {
         table: { type: "string", description: "Target table name" },
-        data: { type: "array", description: "Array of objects to import" },
+        data: {
+          type: "array",
+          items: { type: "object", additionalProperties: true },
+          description: "Array of objects to import",
+        },
         database: { type: "string", description: "Database name (optional)" },
         mode: { 
           type: "string", 
