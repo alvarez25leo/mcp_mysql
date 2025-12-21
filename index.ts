@@ -11,7 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { log } from "./src/utils/index.js";
-import type { TableRow, ColumnRow } from "./src/types/index.js";
+import type { TableRow, ColumnRow, RoutineRow, EventRow, TriggerRow } from "./src/types/index.js";
 import {
   ALLOW_DELETE_OPERATION,
   ALLOW_DDL_OPERATION,
@@ -190,13 +190,87 @@ export default function createMcpServer({
         table_schema, table_name
     `;
 
-      const queryResult = (await executeReadOnlyQuery<any>(tablesQuery));
-      const tables = JSON.parse(queryResult.content[0].text) as TableRow[];
-      log("info", `Found ${tables.length} tables`);
+      // Query to get all stored procedures and functions
+      const routinesQuery = `
+      SELECT
+        routine_name as name,
+        routine_schema as \`database\`,
+        routine_type as type,
+        data_type as dataType,
+        routine_comment as description,
+        definer,
+        security_type as securityType,
+        is_deterministic as isDeterministic,
+        created as createTime,
+        last_altered as updateTime
+      FROM
+        information_schema.routines
+      WHERE
+        routine_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+      ORDER BY
+        routine_schema, routine_type, routine_name
+    `;
+
+      // Query to get all events
+      const eventsQuery = `
+      SELECT
+        event_name as name,
+        event_schema as \`database\`,
+        definer,
+        time_zone as timeZone,
+        event_type as eventType,
+        execute_at as executeAt,
+        interval_value as intervalValue,
+        interval_field as intervalField,
+        starts,
+        ends,
+        status,
+        event_comment as description,
+        created as createTime,
+        last_altered as updateTime
+      FROM
+        information_schema.events
+      WHERE
+        event_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+      ORDER BY
+        event_schema, event_name
+    `;
+
+      // Query to get all triggers
+      const triggersQuery = `
+      SELECT
+        trigger_name as name,
+        trigger_schema as \`database\`,
+        event_object_table as tableName,
+        event_manipulation as event,
+        action_timing as timing,
+        definer,
+        created as createTime
+      FROM
+        information_schema.triggers
+      WHERE
+        trigger_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+      ORDER BY
+        trigger_schema, event_object_table, trigger_name
+    `;
+
+      const [tablesResult, routinesResult, eventsResult, triggersResult] = await Promise.all([
+        executeReadOnlyQuery<any>(tablesQuery),
+        executeReadOnlyQuery<any>(routinesQuery),
+        executeReadOnlyQuery<any>(eventsQuery),
+        executeReadOnlyQuery<any>(triggersQuery),
+      ]);
+
+      const tables = JSON.parse(tablesResult.content[0].text) as TableRow[];
+      const routines = JSON.parse(routinesResult.content[0].text) as RoutineRow[];
+      const events = JSON.parse(eventsResult.content[0].text) as EventRow[];
+      const triggers = JSON.parse(triggersResult.content[0].text) as TriggerRow[];
+
+      log("info", `Found ${tables.length} tables, ${routines.length} routines, ${events.length} events, ${triggers.length} triggers`);
 
       // Create resources for each table
       const resources = tables.map((table) => ({
-        uri: `mysql://tables/${table.name}`,
+        uri: `mysql://tables/${table.database}/${table.name}`,
         name: table.name,
         title: `${table.database}.${table.name}`,
         description:
@@ -205,12 +279,90 @@ export default function createMcpServer({
         mimeType: "application/json",
       }));
 
-      // Add a resource for the list of tables
+      // Create resources for stored procedures
+      const procedures = routines.filter(r => r.type === 'PROCEDURE');
+      procedures.forEach((proc) => {
+        resources.push({
+          uri: `mysql://procedures/${proc.database}/${proc.name}`,
+          name: proc.name,
+          title: `${proc.database}.${proc.name}`,
+          description: proc.description || `Stored procedure ${proc.name} in database ${proc.database}`,
+          mimeType: "application/json",
+        });
+      });
+
+      // Create resources for functions
+      const functions = routines.filter(r => r.type === 'FUNCTION');
+      functions.forEach((func) => {
+        resources.push({
+          uri: `mysql://functions/${func.database}/${func.name}`,
+          name: func.name,
+          title: `${func.database}.${func.name}`,
+          description: func.description || `Function ${func.name} (returns ${func.dataType}) in database ${func.database}`,
+          mimeType: "application/json",
+        });
+      });
+
+      // Create resources for events
+      events.forEach((event) => {
+        resources.push({
+          uri: `mysql://events/${event.database}/${event.name}`,
+          name: event.name,
+          title: `${event.database}.${event.name}`,
+          description: event.description || `Event ${event.name} (${event.status}) in database ${event.database}`,
+          mimeType: "application/json",
+        });
+      });
+
+      // Create resources for triggers
+      triggers.forEach((trigger) => {
+        resources.push({
+          uri: `mysql://triggers/${trigger.database}/${trigger.name}`,
+          name: trigger.name,
+          title: `${trigger.database}.${trigger.name}`,
+          description: `Trigger ${trigger.name} (${trigger.timing} ${trigger.event} on ${trigger.tableName})`,
+          mimeType: "application/json",
+        });
+      });
+
+      // Add summary resources
       resources.push({
         uri: "mysql://tables",
         name: "Tables",
         title: "MySQL Tables",
         description: "List of all MySQL tables",
+        mimeType: "application/json",
+      });
+
+      resources.push({
+        uri: "mysql://procedures",
+        name: "Procedures",
+        title: "MySQL Stored Procedures",
+        description: "List of all MySQL stored procedures",
+        mimeType: "application/json",
+      });
+
+      resources.push({
+        uri: "mysql://functions",
+        name: "Functions",
+        title: "MySQL Functions",
+        description: "List of all MySQL functions",
+        mimeType: "application/json",
+      });
+
+      resources.push({
+        uri: "mysql://events",
+        name: "Events",
+        title: "MySQL Events",
+        description: "List of all MySQL scheduled events",
+        mimeType: "application/json",
+      });
+
+      resources.push({
+        uri: "mysql://triggers",
+        name: "Triggers",
+        title: "MySQL Triggers",
+        description: "List of all MySQL triggers",
         mimeType: "application/json",
       });
 
@@ -226,36 +378,290 @@ export default function createMcpServer({
     try {
       log("info", "Handling ReadResourceRequest:", request.params.uri);
 
-      // Parse the URI to extract table name and optional database name
-      const uriParts = request.params.uri.split("/");
-      const tableName = uriParts.pop();
-      const dbName = uriParts.length > 0 ? uriParts.pop() : null;
+      const uri = request.params.uri;
+      const uriParts = uri.replace("mysql://", "").split("/");
+      const resourceType = uriParts[0]; // tables, procedures, functions, events, triggers
+      const dbName = uriParts.length > 2 ? uriParts[1] : null;
+      const objectName = uriParts.length > 2 ? uriParts[2] : uriParts[1];
 
-      if (!tableName) {
+      if (!objectName && resourceType !== "tables" && resourceType !== "procedures" && 
+          resourceType !== "functions" && resourceType !== "events" && resourceType !== "triggers") {
         throw new Error(`Invalid resource URI: ${request.params.uri}`);
       }
 
-      // Modify query to include schema information
-      let columnsQuery =
-        "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?";
-      let queryParams = [tableName as string];
+      let results: any;
+      let responseText: string;
 
-      if (dbName) {
-        columnsQuery += " AND table_schema = ?";
-        queryParams.push(dbName);
+      switch (resourceType) {
+        case "tables": {
+          if (!objectName) {
+            // Return list of all tables
+            const tablesQuery = `
+              SELECT table_name as name, table_schema as \`database\`
+              FROM information_schema.tables
+              WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+              ORDER BY table_schema, table_name
+            `;
+            const queryResult = await executeReadOnlyQuery<any>(tablesQuery);
+            responseText = queryResult.content[0].text;
+          } else {
+            // Return columns for specific table
+            let columnsQuery = `
+              SELECT 
+                column_name as name,
+                data_type as dataType,
+                column_type as columnType,
+                is_nullable as isNullable,
+                column_key as columnKey,
+                column_default as defaultValue,
+                extra,
+                column_comment as comment
+              FROM information_schema.columns 
+              WHERE table_name = ?
+            `;
+            const queryParams = [objectName];
+            if (dbName) {
+              columnsQuery += " AND table_schema = ?";
+              queryParams.push(dbName);
+            }
+            columnsQuery += " ORDER BY ordinal_position";
+            results = await executeQuery(columnsQuery, queryParams);
+            responseText = JSON.stringify(results, null, 2);
+          }
+          break;
+        }
+
+        case "procedures": {
+          if (!objectName) {
+            // Return list of all procedures
+            const proceduresQuery = `
+              SELECT routine_name as name, routine_schema as \`database\`
+              FROM information_schema.routines
+              WHERE routine_type = 'PROCEDURE'
+                AND routine_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+              ORDER BY routine_schema, routine_name
+            `;
+            const queryResult = await executeReadOnlyQuery<any>(proceduresQuery);
+            responseText = queryResult.content[0].text;
+          } else {
+            // Return procedure definition
+            const procedureQuery = dbName
+              ? `SHOW CREATE PROCEDURE \`${dbName}\`.\`${objectName}\``
+              : `SHOW CREATE PROCEDURE \`${objectName}\``;
+            const createResult = await executeQuery<any[]>(procedureQuery);
+            
+            // Get parameters
+            let paramsQuery = `
+              SELECT 
+                parameter_name as name,
+                parameter_mode as mode,
+                data_type as dataType,
+                dtd_identifier as fullType
+              FROM information_schema.parameters
+              WHERE specific_name = ? AND routine_type = 'PROCEDURE'
+            `;
+            const paramsQueryParams = [objectName];
+            if (dbName) {
+              paramsQuery += " AND specific_schema = ?";
+              paramsQueryParams.push(dbName);
+            }
+            paramsQuery += " ORDER BY ordinal_position";
+            const paramsResult = await executeQuery<any[]>(paramsQuery, paramsQueryParams);
+
+            responseText = JSON.stringify({
+              name: objectName,
+              database: dbName,
+              type: "PROCEDURE",
+              parameters: paramsResult,
+              definition: createResult[0]?.['Create Procedure'] || null,
+            }, null, 2);
+          }
+          break;
+        }
+
+        case "functions": {
+          if (!objectName) {
+            // Return list of all functions
+            const functionsQuery = `
+              SELECT routine_name as name, routine_schema as \`database\`, data_type as returnType
+              FROM information_schema.routines
+              WHERE routine_type = 'FUNCTION'
+                AND routine_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+              ORDER BY routine_schema, routine_name
+            `;
+            const queryResult = await executeReadOnlyQuery<any>(functionsQuery);
+            responseText = queryResult.content[0].text;
+          } else {
+            // Return function definition
+            const functionQuery = dbName
+              ? `SHOW CREATE FUNCTION \`${dbName}\`.\`${objectName}\``
+              : `SHOW CREATE FUNCTION \`${objectName}\``;
+            const createResult = await executeQuery<any[]>(functionQuery);
+            
+            // Get parameters
+            let paramsQuery = `
+              SELECT 
+                parameter_name as name,
+                parameter_mode as mode,
+                data_type as dataType,
+                dtd_identifier as fullType
+              FROM information_schema.parameters
+              WHERE specific_name = ? AND routine_type = 'FUNCTION'
+            `;
+            const paramsQueryParams = [objectName];
+            if (dbName) {
+              paramsQuery += " AND specific_schema = ?";
+              paramsQueryParams.push(dbName);
+            }
+            paramsQuery += " ORDER BY ordinal_position";
+            const paramsResult = await executeQuery<any[]>(paramsQuery, paramsQueryParams);
+
+            // Get return type
+            let returnQuery = `
+              SELECT data_type as returnType, dtd_identifier as fullReturnType
+              FROM information_schema.routines
+              WHERE routine_name = ? AND routine_type = 'FUNCTION'
+            `;
+            const returnQueryParams = [objectName];
+            if (dbName) {
+              returnQuery += " AND routine_schema = ?";
+              returnQueryParams.push(dbName);
+            }
+            const returnResult = await executeQuery<any[]>(returnQuery, returnQueryParams);
+
+            responseText = JSON.stringify({
+              name: objectName,
+              database: dbName,
+              type: "FUNCTION",
+              returnType: returnResult[0]?.returnType || null,
+              fullReturnType: returnResult[0]?.fullReturnType || null,
+              parameters: paramsResult.filter(p => p.name), // Filter out return parameter
+              definition: createResult[0]?.['Create Function'] || null,
+            }, null, 2);
+          }
+          break;
+        }
+
+        case "events": {
+          if (!objectName) {
+            // Return list of all events
+            const eventsQuery = `
+              SELECT event_name as name, event_schema as \`database\`, status, event_type as eventType
+              FROM information_schema.events
+              WHERE event_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+              ORDER BY event_schema, event_name
+            `;
+            const queryResult = await executeReadOnlyQuery<any>(eventsQuery);
+            responseText = queryResult.content[0].text;
+          } else {
+            // Return event definition
+            const eventQuery = dbName
+              ? `SHOW CREATE EVENT \`${dbName}\`.\`${objectName}\``
+              : `SHOW CREATE EVENT \`${objectName}\``;
+            const createResult = await executeQuery<any[]>(eventQuery);
+
+            // Get event details
+            let detailsQuery = `
+              SELECT 
+                event_name as name,
+                event_schema as \`database\`,
+                definer,
+                time_zone as timeZone,
+                event_type as eventType,
+                execute_at as executeAt,
+                interval_value as intervalValue,
+                interval_field as intervalField,
+                starts,
+                ends,
+                status,
+                on_completion as onCompletion,
+                event_comment as comment
+              FROM information_schema.events
+              WHERE event_name = ?
+            `;
+            const detailsQueryParams = [objectName];
+            if (dbName) {
+              detailsQuery += " AND event_schema = ?";
+              detailsQueryParams.push(dbName);
+            }
+            const detailsResult = await executeQuery<any[]>(detailsQuery, detailsQueryParams);
+
+            responseText = JSON.stringify({
+              ...detailsResult[0],
+              definition: createResult[0]?.['Create Event'] || null,
+            }, null, 2);
+          }
+          break;
+        }
+
+        case "triggers": {
+          if (!objectName) {
+            // Return list of all triggers
+            const triggersQuery = `
+              SELECT 
+                trigger_name as name, 
+                trigger_schema as \`database\`,
+                event_object_table as tableName,
+                action_timing as timing,
+                event_manipulation as event
+              FROM information_schema.triggers
+              WHERE trigger_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+              ORDER BY trigger_schema, trigger_name
+            `;
+            const queryResult = await executeReadOnlyQuery<any>(triggersQuery);
+            responseText = queryResult.content[0].text;
+          } else {
+            // Return trigger definition
+            const triggerQuery = dbName
+              ? `SHOW CREATE TRIGGER \`${dbName}\`.\`${objectName}\``
+              : `SHOW CREATE TRIGGER \`${objectName}\``;
+            const createResult = await executeQuery<any[]>(triggerQuery);
+
+            // Get trigger details
+            let detailsQuery = `
+              SELECT 
+                trigger_name as name,
+                trigger_schema as \`database\`,
+                event_object_table as tableName,
+                action_timing as timing,
+                event_manipulation as event,
+                action_orientation as orientation,
+                definer,
+                created as createTime
+              FROM information_schema.triggers
+              WHERE trigger_name = ?
+            `;
+            const detailsQueryParams = [objectName];
+            if (dbName) {
+              detailsQuery += " AND trigger_schema = ?";
+              detailsQueryParams.push(dbName);
+            }
+            const detailsResult = await executeQuery<any[]>(detailsQuery, detailsQueryParams);
+
+            responseText = JSON.stringify({
+              ...detailsResult[0],
+              definition: createResult[0]?.['SQL Original Statement'] || null,
+            }, null, 2);
+          }
+          break;
+        }
+
+        default: {
+          // Fallback: try to get table columns (backward compatibility)
+          let columnsQuery =
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?";
+          const queryParams = [resourceType];
+          results = await executeQuery(columnsQuery, queryParams);
+          responseText = JSON.stringify(results, null, 2);
+        }
       }
-
-      const results = (await executeQuery(
-        columnsQuery,
-        queryParams,
-      )) as ColumnRow[];
 
       return {
         contents: [
           {
             uri: request.params.uri,
             mimeType: "application/json",
-            text: JSON.stringify(results, null, 2),
+            text: responseText,
           },
         ],
       };
