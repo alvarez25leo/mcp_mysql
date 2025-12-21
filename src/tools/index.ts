@@ -1301,7 +1301,11 @@ export const additionalToolDefinitions = [
       type: "object",
       properties: {
         procedureName: { type: "string", description: "Name of the stored procedure" },
-        params: { type: "array", description: "Array of parameters to pass" },
+        params: {
+          type: "array",
+          items: { type: ["string", "number", "boolean", "null"] },
+          description: "Array of parameters to pass",
+        },
         database: { type: "string", description: "Database name (optional)" },
       },
       required: ["procedureName"],
