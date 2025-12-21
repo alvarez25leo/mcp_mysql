@@ -10,6 +10,7 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { performance } from "perf_hooks";
 import { log } from "./src/utils/index.js";
 import type { TableRow, ColumnRow, RoutineRow, EventRow, TriggerRow } from "./src/types/index.js";
 import {
@@ -35,6 +36,11 @@ import {
   executeReadOnlyQuery,
   poolPromise,
 } from "./src/db/index.js";
+import {
+  additionalToolDefinitions,
+  handleAdditionalTool,
+  addToQueryHistory,
+} from "./src/tools/index.js";
 
 import path from 'path';
 import express, { Request, Response } from "express";
@@ -673,17 +679,56 @@ export default function createMcpServer({
 
   // Register handler for tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const startTime = performance.now();
     try {
       log("info", "Handling CallToolRequest:", request.params.name);
-      if (request.params.name !== "mysql_query") {
-        throw new Error(`Unknown tool: ${request.params.name}`);
+      
+      const toolName = request.params.name;
+      const args = request.params.arguments || {};
+
+      // Check if it's one of the additional tools
+      const additionalToolResult = await handleAdditionalTool(toolName, args as Record<string, any>);
+      if (additionalToolResult !== null) {
+        const duration = performance.now() - startTime;
+        addToQueryHistory(
+          `[TOOL] ${toolName}: ${JSON.stringify(args).substring(0, 200)}`,
+          duration,
+          0,
+          !additionalToolResult.isError
+        );
+        return additionalToolResult as { content: Array<{ type: string; text: string }>; isError: boolean };
       }
 
-      const sql = request.params.arguments?.sql as string;
-      return await executeReadOnlyQuery(sql);
+      // Handle mysql_query tool
+      if (toolName === "mysql_query") {
+        const sql = args.sql as string;
+        const result = await executeReadOnlyQuery<{ content: Array<{ type: string; text: string }>; isError: boolean }>(sql);
+        const duration = performance.now() - startTime;
+        
+        // Add to query history
+        try {
+          const rowCount = result?.content?.[0]?.text ? 
+            (JSON.parse(result.content[0].text) || []).length : 0;
+          addToQueryHistory(sql, duration, rowCount, !result.isError);
+        } catch {
+          addToQueryHistory(sql, duration, 0, !result.isError);
+        }
+        
+        return result;
+      }
+
+      throw new Error(`Unknown tool: ${toolName}`);
     } catch (err) {
       const error = err as Error;
       log("error", "Error in CallToolRequest handler:", error);
+      const duration = performance.now() - startTime;
+      addToQueryHistory(
+        `[ERROR] ${request.params.name}`,
+        duration,
+        0,
+        false,
+        error.message
+      );
       return {
         content: [{
           type: "text",
@@ -714,6 +759,8 @@ export default function createMcpServer({
             required: ["sql"],
           },
         },
+        // Add all additional tools
+        ...additionalToolDefinitions,
       ],
     };
 
