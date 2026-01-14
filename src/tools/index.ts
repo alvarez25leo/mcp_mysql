@@ -3,7 +3,7 @@
  * Provides extended functionality for database analysis, optimization, and management
  */
 
-import { executeQuery, getPool } from "../db/index.js";
+import { executeQuery, executeReadOnlyQuery, getPool } from "../db/index.js";
 import { log } from "../utils/index.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -1194,6 +1194,257 @@ export async function mysqlKillProcess(
 }
 
 // ============================================================================
+// TOOL: mysql_create_procedure - Create stored procedure
+// ============================================================================
+
+export async function mysqlCreateProcedure(
+  procedureName: string,
+  procedureBody: string,
+  database?: string,
+  parameters?: string,
+  characteristics?: {
+    comment?: string;
+    language?: "SQL";
+    deterministic?: boolean;
+    containsSql?: "CONTAINS SQL" | "NO SQL" | "READS SQL DATA" | "MODIFIES SQL DATA";
+    sqlSecurity?: "DEFINER" | "INVOKER";
+  }
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const fullProcName = database ? `\`${database}\`.\`${procedureName}\`` : `\`${procedureName}\``;
+    
+    // Build CREATE PROCEDURE statement
+    let createSql = `CREATE PROCEDURE ${fullProcName}`;
+    
+    // Add parameters if provided
+    if (parameters) {
+      createSql += `(${parameters})`;
+    } else {
+      createSql += `()`;
+    }
+    
+    // Add characteristics
+    if (characteristics) {
+      const chars: string[] = [];
+      if (characteristics.language) {
+        chars.push(`LANGUAGE ${characteristics.language}`);
+      }
+      if (characteristics.deterministic !== undefined) {
+        chars.push(characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC");
+      }
+      if (characteristics.containsSql) {
+        chars.push(characteristics.containsSql);
+      }
+      if (characteristics.sqlSecurity) {
+        chars.push(`SQL SECURITY ${characteristics.sqlSecurity}`);
+      }
+      if (characteristics.comment) {
+        chars.push(`COMMENT '${characteristics.comment.replace(/'/g, "''")}'`);
+      }
+      if (chars.length > 0) {
+        createSql += `\n${chars.join("\n")}`;
+      }
+    }
+    
+    createSql += `\nBEGIN\n${procedureBody}\nEND`;
+    
+    log("info", `Creating stored procedure: ${procedureName}`);
+    
+    // CREATE PROCEDURE cannot run in transactions, so use direct connection
+    const pool = await getPool();
+    const connection = await pool.getConnection();
+    
+    try {
+      // Check if procedure exists (to provide better error message)
+      try {
+        const checkQuery = database
+          ? `SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'`
+          : `SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'`;
+        const checkParams = database ? [database, procedureName] : [procedureName];
+        const existing = await connection.query(checkQuery, checkParams);
+        if (Array.isArray(existing) && existing[0] && (existing[0] as any[]).length > 0) {
+          return {
+            content: [{ type: "text", text: `Error: Procedure '${procedureName}' already exists. Use mysql_alter_procedure to modify it.` }],
+            isError: true,
+          };
+        }
+      } catch {
+        // Ignore check errors
+      }
+      
+      // Execute CREATE PROCEDURE
+      await connection.query(createSql);
+      
+      return {
+        content: [
+          { type: "text", text: `Successfully created procedure '${procedureName}'` },
+          { type: "text", text: `\nGenerated SQL:\n${createSql}` },
+        ],
+        isError: false,
+      };
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    log("error", "Error in mysql_create_procedure:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================================
+// TOOL: mysql_alter_procedure - Modify stored procedure (DROP + CREATE)
+// ============================================================================
+
+export async function mysqlAlterProcedure(
+  procedureName: string,
+  procedureBody: string,
+  database?: string,
+  parameters?: string,
+  characteristics?: {
+    comment?: string;
+    language?: "SQL";
+    deterministic?: boolean;
+    containsSql?: "CONTAINS SQL" | "NO SQL" | "READS SQL DATA" | "MODIFIES SQL DATA";
+    sqlSecurity?: "DEFINER" | "INVOKER";
+  },
+  ifExists?: boolean
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const fullProcName = database ? `\`${database}\`.\`${procedureName}\`` : `\`${procedureName}\``;
+    
+    // Build CREATE PROCEDURE statement (same as create)
+    let createSql = `CREATE PROCEDURE ${fullProcName}`;
+    
+    if (parameters) {
+      createSql += `(${parameters})`;
+    } else {
+      createSql += `()`;
+    }
+    
+    if (characteristics) {
+      const chars: string[] = [];
+      if (characteristics.language) {
+        chars.push(`LANGUAGE ${characteristics.language}`);
+      }
+      if (characteristics.deterministic !== undefined) {
+        chars.push(characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC");
+      }
+      if (characteristics.containsSql) {
+        chars.push(characteristics.containsSql);
+      }
+      if (characteristics.sqlSecurity) {
+        chars.push(`SQL SECURITY ${characteristics.sqlSecurity}`);
+      }
+      if (characteristics.comment) {
+        chars.push(`COMMENT '${characteristics.comment.replace(/'/g, "''")}'`);
+      }
+      if (chars.length > 0) {
+        createSql += `\n${chars.join("\n")}`;
+      }
+    }
+    
+    createSql += `\nBEGIN\n${procedureBody}\nEND`;
+    
+    log("info", `Modifying stored procedure: ${procedureName}`);
+    
+    // DROP and CREATE cannot run in transactions for procedures
+    const pool = await getPool();
+    const connection = await pool.getConnection();
+    
+    try {
+      // Drop existing procedure
+      const dropSql = `DROP PROCEDURE ${ifExists ? "IF EXISTS" : ""} ${fullProcName}`;
+      try {
+        await connection.query(dropSql);
+      } catch (dropError) {
+        if (!ifExists) {
+          throw dropError;
+        }
+        // If IF EXISTS and procedure doesn't exist, continue
+      }
+      
+      // Create new procedure
+      await connection.query(createSql);
+      
+      return {
+        content: [
+          { type: "text", text: `Successfully modified procedure '${procedureName}'` },
+          { type: "text", text: `\nGenerated SQL:\n${dropSql};\n${createSql}` },
+        ],
+        isError: false,
+      };
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    log("error", "Error in mysql_alter_procedure:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================================
+// TOOL: mysql_alter_table - Execute ALTER TABLE operations
+// ============================================================================
+
+export async function mysqlAlterTable(
+  table: string,
+  alterStatement: string,
+  database?: string
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    if (!alterStatement || alterStatement.trim().length === 0) {
+      return {
+        content: [{ type: "text", text: "Error: alterStatement is required and cannot be empty" }],
+        isError: true,
+      };
+    }
+    
+    const fullTableName = database ? `\`${database}\`.\`${table}\`` : `\`${table}\``;
+    const sql = `ALTER TABLE ${fullTableName} ${alterStatement}`;
+    
+    log("info", `Executing ALTER TABLE: ${sql}`);
+    
+    // Use executeReadOnlyQuery which will delegate to executeWriteQuery for DDL operations
+    // This ensures proper permission checking
+    const result = await executeReadOnlyQuery<{ content: Array<{ type: string; text: string }>; isError: boolean }>(sql);
+    
+    if (result.isError) {
+      return result;
+    }
+    
+    return {
+      content: [
+        { type: "text", text: `Successfully executed ALTER TABLE on '${table}'` },
+        { type: "text", text: `\nExecuted SQL: ${sql}` },
+        ...(result.content || [])
+      ],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_alter_table:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================================
 // Export tool definitions for MCP registration
 // ============================================================================
 
@@ -1393,6 +1644,78 @@ export const additionalToolDefinitions = [
       required: ["processId"],
     },
   },
+  {
+    name: "mysql_create_procedure",
+    description: "Create a new stored procedure in MySQL",
+    inputSchema: {
+      type: "object",
+      properties: {
+        procedureName: { type: "string", description: "Name of the procedure to create" },
+        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block" },
+        database: { type: "string", description: "Database name (optional)" },
+        parameters: { type: "string", description: "Procedure parameters (e.g., 'IN param1 INT, OUT param2 VARCHAR(100)')" },
+        characteristics: {
+          type: "object",
+          description: "Procedure characteristics",
+          properties: {
+            comment: { type: "string", description: "Procedure comment" },
+            language: { type: "string", enum: ["SQL"], description: "Language (default: SQL)" },
+            deterministic: { type: "boolean", description: "Whether the procedure is deterministic" },
+            containsSql: {
+              type: "string",
+              enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
+              description: "SQL data access characteristics"
+            },
+            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "SQL security type" },
+          },
+        },
+      },
+      required: ["procedureName", "procedureBody"],
+    },
+  },
+  {
+    name: "mysql_alter_procedure",
+    description: "Modify an existing stored procedure (drops and recreates it)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        procedureName: { type: "string", description: "Name of the procedure to modify" },
+        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block" },
+        database: { type: "string", description: "Database name (optional)" },
+        parameters: { type: "string", description: "Procedure parameters (e.g., 'IN param1 INT, OUT param2 VARCHAR(100)')" },
+        characteristics: {
+          type: "object",
+          description: "Procedure characteristics",
+          properties: {
+            comment: { type: "string", description: "Procedure comment" },
+            language: { type: "string", enum: ["SQL"], description: "Language (default: SQL)" },
+            deterministic: { type: "boolean", description: "Whether the procedure is deterministic" },
+            containsSql: {
+              type: "string",
+              enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
+              description: "SQL data access characteristics"
+            },
+            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "SQL security type" },
+          },
+        },
+        ifExists: { type: "boolean", description: "Use IF EXISTS when dropping (default: false)" },
+      },
+      required: ["procedureName", "procedureBody"],
+    },
+  },
+  {
+    name: "mysql_alter_table",
+    description: "Execute ALTER TABLE operations on a table (e.g., ADD COLUMN, MODIFY COLUMN, DROP COLUMN, ADD INDEX, etc.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        table: { type: "string", description: "Table name to alter" },
+        alterStatement: { type: "string", description: "ALTER TABLE statement body (e.g., 'ADD COLUMN name VARCHAR(100)', 'MODIFY COLUMN id INT AUTO_INCREMENT', 'DROP COLUMN old_column', 'ADD INDEX idx_name (name)')" },
+        database: { type: "string", description: "Database name (optional)" },
+      },
+      required: ["table", "alterStatement"],
+    },
+  },
 ];
 
 // Handler function to route tool calls
@@ -1452,6 +1775,28 @@ export async function handleAdditionalTool(
     
     case "mysql_kill_process":
       return mysqlKillProcess(args.processId);
+    
+    case "mysql_create_procedure":
+      return mysqlCreateProcedure(
+        args.procedureName,
+        args.procedureBody,
+        args.database,
+        args.parameters,
+        args.characteristics
+      );
+    
+    case "mysql_alter_procedure":
+      return mysqlAlterProcedure(
+        args.procedureName,
+        args.procedureBody,
+        args.database,
+        args.parameters,
+        args.characteristics,
+        args.ifExists
+      );
+    
+    case "mysql_alter_table":
+      return mysqlAlterTable(args.table, args.alterStatement, args.database);
     
     default:
       return null; // Tool not handled here
