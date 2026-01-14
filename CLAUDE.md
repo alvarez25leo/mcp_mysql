@@ -187,7 +187,6 @@ When `IS_REMOTE_MCP=true` and `REMOTE_SECRET_KEY` is set:
 │   ├── unit/                  # Unit tests
 │   ├── integration/           # Integration tests (MySQL required)
 │   └── e2e/                   # End-to-end server tests
-├── evals.ts                   # MCP evaluation scripts
 └── dist/                      # Compiled JavaScript output
 ```
 

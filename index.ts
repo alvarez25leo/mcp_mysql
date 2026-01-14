@@ -147,21 +147,7 @@ export default function createMcpServer({
     {
       capabilities: {
         resources: {},
-        tools: {
-          mysql_query: {
-            description: toolDescription,
-            inputSchema: {
-              type: "object",
-              properties: {
-                sql: {
-                  type: "string",
-                  description: "The SQL query to execute",
-                },
-              },
-              required: ["sql"],
-            },
-          },
-        },
+        tools: {},
       },
     },
   );
