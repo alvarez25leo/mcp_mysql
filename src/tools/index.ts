@@ -109,20 +109,30 @@ export async function mysqlExplain(sql: string, format: "traditional" | "json" |
     // Analyze the plan and provide suggestions
     if (format === "traditional" && Array.isArray(result)) {
       for (const row of result) {
-        if (row.type === "ALL") {
-          response.suggestions.push(`⚠️ Full table scan detected on '${row.table}'. Consider adding an index.`);
+        // MySQL EXPLAIN traditional format uses uppercase column names
+        const type = row.type || row.Type;
+        const table = row.table || row.Table;
+        const key = row.key || row.Key;
+        const possibleKeys = row.possible_keys || row.Possible_keys;
+        const rows = row.rows || row.Rows;
+        const extra = row.Extra || row.EXTRA;
+        
+        if (type === "ALL") {
+          response.suggestions.push(`⚠️ Full table scan detected on '${table}'. Consider adding an index.`);
         }
-        if (row.type === "index" && row.rows > 1000) {
-          response.suggestions.push(`⚠️ Index scan on '${row.table}' returning ${row.rows} rows. Consider optimizing the query.`);
+        if (type === "index" && rows && rows > 1000) {
+          response.suggestions.push(`⚠️ Index scan on '${table}' returning ${rows} rows. Consider optimizing the query.`);
         }
-        if (!row.key && row.possible_keys) {
-          response.suggestions.push(`💡 Possible keys available but not used on '${row.table}': ${row.possible_keys}`);
+        if (!key && possibleKeys) {
+          response.suggestions.push(`💡 Possible keys available but not used on '${table}': ${possibleKeys}`);
         }
-        if (row.Extra?.includes("Using filesort")) {
-          response.suggestions.push(`⚠️ Using filesort on '${row.table}'. Consider adding an index for ORDER BY columns.`);
-        }
-        if (row.Extra?.includes("Using temporary")) {
-          response.suggestions.push(`⚠️ Using temporary table on '${row.table}'. This may impact performance.`);
+        if (extra && typeof extra === "string") {
+          if (extra.includes("Using filesort")) {
+            response.suggestions.push(`⚠️ Using filesort on '${table}'. Consider adding an index for ORDER BY columns.`);
+          }
+          if (extra.includes("Using temporary")) {
+            response.suggestions.push(`⚠️ Using temporary table on '${table}'. This may impact performance.`);
+          }
         }
       }
     }
@@ -710,12 +720,14 @@ export async function mysqlShowViews(
         FROM information_schema.VIEWS
         WHERE TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
       `;
+      const params: string[] = [];
       if (database) {
-        sql += ` AND TABLE_SCHEMA = '${database}'`;
+        sql += ` AND TABLE_SCHEMA = ?`;
+        params.push(database);
       }
       sql += ` ORDER BY TABLE_SCHEMA, TABLE_NAME`;
 
-      const views = await executeQuery<any[]>(sql);
+      const views = await executeQuery<any[]>(sql, params);
 
       return {
         content: [{
@@ -760,7 +772,16 @@ export async function mysqlVariables(
         };
       }
 
-      const sql = `SET ${scope.toUpperCase()} ${variable} = ?`;
+      // Validate variable name to prevent SQL injection (only alphanumeric, underscore, dot)
+      if (!/^[a-zA-Z0-9_.]+$/.test(variable)) {
+        return {
+          content: [{ type: "text", text: "Error: Invalid variable name. Only alphanumeric characters, underscore, and dot are allowed." }],
+          isError: true,
+        };
+      }
+
+      // Use backticks for variable name and parameterized query for value
+      const sql = `SET ${scope.toUpperCase()} \`${variable}\` = ?`;
       await executeQuery(sql, [value]);
 
       return {
@@ -770,11 +791,13 @@ export async function mysqlVariables(
     } else {
       // Show variables
       let sql = `SHOW ${scope.toUpperCase()} VARIABLES`;
+      const params: string[] = [];
       if (filter) {
-        sql += ` LIKE '%${filter}%'`;
+        sql += ` LIKE ?`;
+        params.push(`%${filter}%`);
       }
 
-      const variables = await executeQuery<any[]>(sql);
+      const variables = await executeQuery<any[]>(sql, params);
 
       // Group variables by category
       const grouped: Record<string, any[]> = {};
@@ -832,11 +855,13 @@ export async function mysqlIndexSuggestions(
       WHERE TABLE_TYPE = 'BASE TABLE'
         AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
     `;
+    const params: string[] = [];
     if (database) {
-      tablesQuery += ` AND TABLE_SCHEMA = '${database}'`;
+      tablesQuery += ` AND TABLE_SCHEMA = ?`;
+      params.push(database);
     }
 
-    const tables = await executeQuery<any[]>(tablesQuery);
+    const tables = await executeQuery<any[]>(tablesQuery, params);
 
     for (const table of tables) {
       const tableSuggestions: any = {
@@ -1059,15 +1084,18 @@ export async function mysqlTableStats(
         AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
     `;
 
+    const params: string[] = [];
     if (database) {
-      sql += ` AND TABLE_SCHEMA = '${database}'`;
+      sql += ` AND TABLE_SCHEMA = ?`;
+      params.push(database);
     }
     if (table) {
-      sql += ` AND TABLE_NAME = '${table}'`;
+      sql += ` AND TABLE_NAME = ?`;
+      params.push(table);
     }
     sql += ` ORDER BY DATA_LENGTH DESC`;
 
-    const tables = await executeQuery<any[]>(sql);
+    const tables = await executeQuery<any[]>(sql, params);
 
     // Format sizes for readability
     const formatSize = (bytes: number) => {
@@ -1179,7 +1207,16 @@ export async function mysqlKillProcess(
   isError: boolean;
 }> {
   try {
-    await executeQuery(`KILL ${processId}`);
+    // Validate processId is a positive integer
+    if (!Number.isInteger(processId) || processId <= 0) {
+      return {
+        content: [{ type: "text", text: "Error: Process ID must be a positive integer" }],
+        isError: true,
+      };
+    }
+    
+    // Use parameterized query for safety
+    await executeQuery(`KILL ?`, [processId.toString()]);
     return {
       content: [{ type: "text", text: `Successfully killed process ${processId}` }],
       isError: false,
