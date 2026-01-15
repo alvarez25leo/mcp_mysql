@@ -733,13 +733,13 @@ export default function createMcpServer({
       tools: [
         {
           name: "mysql_query",
-          description: toolDescription,
+          description: `${toolDescription}. This is the primary tool for executing any SQL query (SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.). Use this tool for general database operations, data retrieval, and SQL execution. For specialized operations, consider using the other MySQL tools (mysql_explain for query optimization, mysql_describe for table structure, etc.). Queries are executed with proper transaction handling and permission checking.`,
           inputSchema: {
             type: "object",
             properties: {
               sql: {
                 type: "string",
-                description: "The SQL query to execute",
+                description: "The SQL query to execute. Can be any valid MySQL statement: SELECT (read data), INSERT/UPDATE/DELETE (modify data, requires permissions), CREATE/ALTER/DROP (DDL operations, requires permissions), CALL (stored procedures), SHOW (metadata queries), etc.",
               },
             },
             required: ["sql"],

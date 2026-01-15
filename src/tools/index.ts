@@ -1488,15 +1488,15 @@ export async function mysqlAlterTable(
 export const additionalToolDefinitions = [
   {
     name: "mysql_explain",
-    description: "Analyze query execution plan (EXPLAIN/EXPLAIN ANALYZE). Returns optimization suggestions.",
+    description: "Analyze SQL query execution plan using EXPLAIN/EXPLAIN ANALYZE. Use this tool to optimize slow queries, understand how MySQL executes queries, and get automatic suggestions for adding indexes or improving query structure. Returns detailed execution plan with optimization recommendations. Works with SELECT, UPDATE, DELETE, and INSERT queries.",
     inputSchema: {
       type: "object",
       properties: {
-        sql: { type: "string", description: "The SQL query to analyze" },
+        sql: { type: "string", description: "The SQL query to analyze (SELECT, UPDATE, DELETE, or INSERT)" },
         format: { 
           type: "string", 
           enum: ["traditional", "json", "tree"],
-          description: "Output format (default: traditional)" 
+          description: "Output format: 'traditional' (default, human-readable table), 'json' (structured JSON), or 'tree' (hierarchical tree format)" 
         },
       },
       required: ["sql"],
@@ -1504,48 +1504,48 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_describe",
-    description: "Get detailed table structure including columns, indexes, foreign keys, and statistics",
+    description: "Get comprehensive table structure information. Returns columns with data types, indexes, foreign key relationships, table statistics (row count, size, engine), and the CREATE TABLE statement. Use this tool when you need to understand a table's schema, check column types, see indexes, or analyze table structure before making changes.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Table name" },
-        database: { type: "string", description: "Database name (optional)" },
+        table: { type: "string", description: "Name of the table to describe" },
+        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
       },
       required: ["table"],
     },
   },
   {
     name: "mysql_backup",
-    description: "Export table data to JSON or CSV format",
+    description: "Export table data to JSON or CSV format. Use this tool to backup data, export for analysis, or transfer data between systems. Supports filtering with WHERE clauses and limiting row count. Returns the exported data in the specified format.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Table name to export" },
-        format: { type: "string", enum: ["json", "csv"], description: "Export format (default: json)" },
-        database: { type: "string", description: "Database name (optional)" },
-        whereClause: { type: "string", description: "WHERE clause for filtering (without WHERE keyword)" },
-        limit: { type: "number", description: "Maximum rows to export" },
+        table: { type: "string", description: "Name of the table to export data from" },
+        format: { type: "string", enum: ["json", "csv"], description: "Export format: 'json' (default, structured data) or 'csv' (comma-separated values for spreadsheets)" },
+        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
+        whereClause: { type: "string", description: "SQL WHERE clause conditions without the 'WHERE' keyword (e.g., 'status = \"active\" AND created_at > \"2024-01-01\"')" },
+        limit: { type: "number", description: "Maximum number of rows to export (useful for large tables)" },
       },
       required: ["table"],
     },
   },
   {
     name: "mysql_import",
-    description: "Import data from JSON array into a table",
+    description: "Import data from a JSON array into a table. Use this tool to bulk insert data, restore backups, or sync data. Supports three modes: 'insert' (adds new rows), 'replace' (replaces existing rows with same primary key), and 'upsert' (inserts new or updates existing based on primary key). All operations run in a transaction for data integrity.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Target table name" },
+        table: { type: "string", description: "Target table name where data will be imported" },
         data: {
           type: "array",
           items: { type: "object", additionalProperties: true },
-          description: "Array of objects to import",
+          description: "Array of objects to import. Each object should have keys matching table column names. Example: [{\"id\": 1, \"name\": \"John\"}, {\"id\": 2, \"name\": \"Jane\"}]",
         },
-        database: { type: "string", description: "Database name (optional)" },
+        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
         mode: { 
           type: "string", 
           enum: ["insert", "replace", "upsert"],
-          description: "Import mode: insert (default), replace, or upsert (ON DUPLICATE KEY UPDATE)" 
+          description: "Import mode: 'insert' (default, adds new rows only), 'replace' (replaces existing rows with same primary/unique key), 'upsert' (inserts new rows or updates existing ones using ON DUPLICATE KEY UPDATE)" 
         },
       },
       required: ["table", "data"],
@@ -1553,157 +1553,157 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_compare_schemas",
-    description: "Compare structure between two databases and find differences",
+    description: "Compare the structure (schema) between two databases and identify differences. Use this tool to find missing tables, different column definitions, or schema drift between environments (dev vs prod, staging vs production, etc.). Returns detailed comparison showing tables only in source, tables only in target, and column differences in common tables.",
     inputSchema: {
       type: "object",
       properties: {
-        sourceDb: { type: "string", description: "Source database name" },
-        targetDb: { type: "string", description: "Target database name" },
+        sourceDb: { type: "string", description: "Source database name (the reference schema to compare FROM)" },
+        targetDb: { type: "string", description: "Target database name (the schema to compare TO)" },
       },
       required: ["sourceDb", "targetDb"],
     },
   },
   {
     name: "mysql_generate_migration",
-    description: "Generate SQL migration script to sync two database schemas",
+    description: "Generate a SQL migration script to synchronize two database schemas. Use this after mysql_compare_schemas to create ALTER TABLE statements that will make the target database match the source. The generated script includes CREATE TABLE for missing tables, ALTER TABLE for column changes, and commented DROP statements for safety. Review the script carefully before executing.",
     inputSchema: {
       type: "object",
       properties: {
-        sourceDb: { type: "string", description: "Source database (schema to migrate FROM)" },
-        targetDb: { type: "string", description: "Target database (schema to migrate TO)" },
+        sourceDb: { type: "string", description: "Source database name (the reference schema to migrate FROM - this is the desired state)" },
+        targetDb: { type: "string", description: "Target database name (the schema to migrate TO - this will be modified to match source)" },
       },
       required: ["sourceDb", "targetDb"],
     },
   },
   {
     name: "mysql_query_history",
-    description: "View history of executed queries in this session",
+    description: "View or clear the history of executed queries in the current session. Use this tool to review what queries have been run, check execution times, see which queries failed, or debug issues. The history includes SQL statements, execution duration, row counts, and success/failure status. History is stored in-memory and cleared when the session ends.",
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "number", description: "Number of recent queries to show (default: 50)" },
-        clear: { type: "boolean", description: "Clear the query history" },
+        limit: { type: "number", description: "Number of most recent queries to return (default: 50, maximum: 100)" },
+        clear: { type: "boolean", description: "If true, clears the entire query history instead of returning it" },
       },
     },
   },
   {
     name: "mysql_call_procedure",
-    description: "Execute a stored procedure with CALL statement",
+    description: "Execute a MySQL stored procedure using the CALL statement. Use this tool to run stored procedures that encapsulate business logic, perform complex operations, or return result sets. Parameters are passed as an array in the order defined by the procedure. Returns the procedure's result set or output parameters.",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the stored procedure" },
+        procedureName: { type: "string", description: "Name of the stored procedure to execute" },
         params: {
           type: "array",
           items: {},
-          description: "Array of parameters to pass (can be strings, numbers, booleans, or null)",
+          description: "Array of parameter values in the order defined by the procedure. Can contain strings, numbers, booleans, or null. Example: [\"value1\", 123, true]",
         },
-        database: { type: "string", description: "Database name (optional)" },
+        database: { type: "string", description: "Database name where the procedure exists (optional, uses current database if not specified)" },
       },
       required: ["procedureName"],
     },
   },
   {
     name: "mysql_show_views",
-    description: "List all views or get details of a specific view",
+    description: "List all database views or get detailed information about a specific view. Use this tool to discover available views, understand view definitions, check if views are updatable, or see view metadata. Views are virtual tables based on SELECT queries. If viewName is provided, returns detailed view structure including columns and definition.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name (optional)" },
-        viewName: { type: "string", description: "Specific view name to describe (optional)" },
+        database: { type: "string", description: "Database name to search views in (optional, searches all databases if not specified)" },
+        viewName: { type: "string", description: "Specific view name to get detailed information for (optional, if omitted returns list of all views)" },
       },
     },
   },
   {
     name: "mysql_variables",
-    description: "Show or set MySQL server variables",
+    description: "Show or set MySQL server configuration variables. Use this tool to check current MySQL settings (like max_connections, innodb_buffer_pool_size, etc.) or modify session/global variables. 'session' variables affect only the current connection, 'global' variables affect all new connections. Use 'filter' to search for specific variables by name pattern.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["show", "set"], description: "Action to perform (default: show)" },
-        scope: { type: "string", enum: ["global", "session"], description: "Variable scope (default: session)" },
-        filter: { type: "string", description: "Filter variables by name pattern" },
-        variable: { type: "string", description: "Variable name (required for set)" },
-        value: { type: "string", description: "New value (required for set)" },
+        action: { type: "string", enum: ["show", "set"], description: "Action to perform: 'show' (default, displays variables) or 'set' (modifies a variable value)" },
+        scope: { type: "string", enum: ["global", "session"], description: "Variable scope: 'session' (default, affects current connection only) or 'global' (affects all new connections, requires SUPER privilege)" },
+        filter: { type: "string", description: "Filter variables by name pattern (e.g., 'max_conn' to find max_connections, max_connect_errors, etc.)" },
+        variable: { type: "string", description: "Variable name to set (required when action='set', e.g., 'max_connections', 'innodb_buffer_pool_size')" },
+        value: { type: "string", description: "New value for the variable (required when action='set', must be a valid value for that variable type)" },
       },
     },
   },
   {
     name: "mysql_index_suggestions",
-    description: "Analyze tables and suggest missing indexes for optimization",
+    description: "Analyze database tables and automatically suggest missing indexes for query optimization. Use this tool to identify performance issues like tables without primary keys, foreign key columns without indexes, or commonly queried columns that should be indexed. Returns actionable suggestions with CREATE INDEX statements ready to execute.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database to analyze (optional, analyzes all if not specified)" },
+        database: { type: "string", description: "Database name to analyze (optional, analyzes all databases if not specified)" },
       },
     },
   },
   {
     name: "mysql_foreign_keys",
-    description: "Show foreign key relationships between tables",
+    description: "Show foreign key relationships between tables. Use this tool to understand database relationships, see which tables reference each other, check referential integrity constraints, or map out the database schema structure. Returns a relationship graph showing which tables reference others and which are referenced by others, including ON UPDATE and ON DELETE rules.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name (optional)" },
-        table: { type: "string", description: "Table name to show relationships for (optional)" },
+        database: { type: "string", description: "Database name to search in (optional, searches all databases if not specified)" },
+        table: { type: "string", description: "Specific table name to show relationships for (optional, if omitted shows all foreign key relationships)" },
       },
     },
   },
   {
     name: "mysql_table_stats",
-    description: "Get detailed statistics for tables (size, rows, fragmentation)",
+    description: "Get detailed statistics and metrics for database tables. Use this tool to monitor table sizes, row counts, fragmentation levels, storage engine information, and identify tables that may need optimization or maintenance. Returns formatted sizes (KB, MB, GB), fragmentation percentages, and summary totals. Useful for capacity planning and performance monitoring.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name (optional)" },
-        table: { type: "string", description: "Table name (optional)" },
+        database: { type: "string", description: "Database name to analyze (optional, analyzes all databases if not specified)" },
+        table: { type: "string", description: "Specific table name to get statistics for (optional, if omitted returns stats for all tables)" },
       },
     },
   },
   {
     name: "mysql_process_list",
-    description: "Show currently running MySQL processes and queries",
+    description: "Show currently running MySQL processes and active queries. Use this tool to monitor database activity, identify long-running queries, see which users are connected, check query execution times, or diagnose performance issues. Returns process list with analysis including active queries count, sleeping connections, and queries grouped by user/command.",
     inputSchema: {
       type: "object",
       properties: {
-        full: { type: "boolean", description: "Show full query text (default: false)" },
+        full: { type: "boolean", description: "If true, shows full query text (default: false, shows truncated queries for readability)" },
       },
     },
   },
   {
     name: "mysql_kill_process",
-    description: "Kill a running MySQL process by ID",
+    description: "Terminate a running MySQL process/query by its process ID. Use this tool to stop long-running queries, kill stuck connections, or free up resources. First use mysql_process_list to find the process ID, then use this tool to kill it. WARNING: This will immediately terminate the query/connection.",
     inputSchema: {
       type: "object",
       properties: {
-        processId: { type: "number", description: "Process ID to kill" },
+        processId: { type: "number", description: "Process ID to kill (get this from mysql_process_list output, must be a positive integer)" },
       },
       required: ["processId"],
     },
   },
   {
     name: "mysql_create_procedure",
-    description: "Create a new stored procedure in MySQL",
+    description: "Create a new MySQL stored procedure. Use this tool to encapsulate business logic, create reusable database functions, or implement complex operations. Stored procedures can accept IN/OUT/INOUT parameters and return result sets. The procedure body contains SQL statements wrapped in BEGIN...END. Returns an error if the procedure already exists (use mysql_alter_procedure to modify existing procedures).",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the procedure to create" },
-        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block" },
-        database: { type: "string", description: "Database name (optional)" },
-        parameters: { type: "string", description: "Procedure parameters (e.g., 'IN param1 INT, OUT param2 VARCHAR(100)')" },
+        procedureName: { type: "string", description: "Name of the procedure to create (must be unique in the database)" },
+        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block. Example: 'SELECT * FROM users WHERE id = user_id; SELECT COUNT(*) INTO total FROM orders;'" },
+        database: { type: "string", description: "Database name where to create the procedure (optional, uses current database if not specified)" },
+        parameters: { type: "string", description: "Procedure parameters definition. Example: 'IN user_id INT, OUT total INT, INOUT counter INT'. Use IN for input, OUT for output, INOUT for both." },
         characteristics: {
           type: "object",
-          description: "Procedure characteristics",
+          description: "Optional procedure characteristics for security and optimization",
           properties: {
-            comment: { type: "string", description: "Procedure comment" },
-            language: { type: "string", enum: ["SQL"], description: "Language (default: SQL)" },
-            deterministic: { type: "boolean", description: "Whether the procedure is deterministic" },
+            comment: { type: "string", description: "Documentation comment describing what the procedure does" },
+            language: { type: "string", enum: ["SQL"], description: "Programming language (default: SQL)" },
+            deterministic: { type: "boolean", description: "Whether the procedure always returns the same result for the same inputs (affects caching)" },
             containsSql: {
               type: "string",
               enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
-              description: "SQL data access characteristics"
+              description: "SQL data access level: 'CONTAINS SQL' (default, may read/write), 'NO SQL' (no SQL), 'READS SQL DATA' (read-only), 'MODIFIES SQL DATA' (may modify data)"
             },
-            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "SQL security type" },
+            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "Security context: 'DEFINER' (runs with creator's privileges) or 'INVOKER' (runs with caller's privileges)" },
           },
         },
       },
@@ -1712,43 +1712,43 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_alter_procedure",
-    description: "Modify an existing stored procedure (drops and recreates it)",
+    description: "Modify an existing stored procedure by dropping and recreating it. Use this tool to update procedure logic, change parameters, or modify characteristics. MySQL doesn't support ALTER PROCEDURE directly, so this tool performs DROP + CREATE. Set ifExists=true to avoid errors if the procedure doesn't exist. WARNING: This will temporarily remove the procedure during recreation.",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the procedure to modify" },
-        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block" },
-        database: { type: "string", description: "Database name (optional)" },
-        parameters: { type: "string", description: "Procedure parameters (e.g., 'IN param1 INT, OUT param2 VARCHAR(100)')" },
+        procedureName: { type: "string", description: "Name of the existing procedure to modify" },
+        procedureBody: { type: "string", description: "Updated SQL statements inside BEGIN...END block" },
+        database: { type: "string", description: "Database name where the procedure exists (optional, uses current database if not specified)" },
+        parameters: { type: "string", description: "Updated procedure parameters. Example: 'IN param1 INT, OUT param2 VARCHAR(100)'. Can be different from original." },
         characteristics: {
           type: "object",
-          description: "Procedure characteristics",
+          description: "Updated procedure characteristics",
           properties: {
-            comment: { type: "string", description: "Procedure comment" },
-            language: { type: "string", enum: ["SQL"], description: "Language (default: SQL)" },
-            deterministic: { type: "boolean", description: "Whether the procedure is deterministic" },
+            comment: { type: "string", description: "Updated documentation comment" },
+            language: { type: "string", enum: ["SQL"], description: "Programming language (default: SQL)" },
+            deterministic: { type: "boolean", description: "Updated determinism setting" },
             containsSql: {
               type: "string",
               enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
-              description: "SQL data access characteristics"
+              description: "Updated SQL data access level"
             },
-            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "SQL security type" },
+            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "Updated security context" },
           },
         },
-        ifExists: { type: "boolean", description: "Use IF EXISTS when dropping (default: false)" },
+        ifExists: { type: "boolean", description: "If true, uses 'DROP PROCEDURE IF EXISTS' to avoid errors if procedure doesn't exist (default: false)" },
       },
       required: ["procedureName", "procedureBody"],
     },
   },
   {
     name: "mysql_alter_table",
-    description: "Execute ALTER TABLE operations on a table (e.g., ADD COLUMN, MODIFY COLUMN, DROP COLUMN, ADD INDEX, etc.)",
+    description: "Execute ALTER TABLE operations to modify table structure. Use this tool to add/modify/drop columns, add/remove indexes, change data types, modify constraints, or rename tables. Supports all MySQL ALTER TABLE operations. The alterStatement should contain the operation without the 'ALTER TABLE table_name' prefix. Returns the executed SQL for verification.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Table name to alter" },
-        alterStatement: { type: "string", description: "ALTER TABLE statement body (e.g., 'ADD COLUMN name VARCHAR(100)', 'MODIFY COLUMN id INT AUTO_INCREMENT', 'DROP COLUMN old_column', 'ADD INDEX idx_name (name)')" },
-        database: { type: "string", description: "Database name (optional)" },
+        table: { type: "string", description: "Name of the table to modify" },
+        alterStatement: { type: "string", description: "ALTER TABLE operation statement (without 'ALTER TABLE table_name' prefix). Examples: 'ADD COLUMN name VARCHAR(100) NOT NULL', 'MODIFY COLUMN id INT AUTO_INCREMENT', 'DROP COLUMN old_column', 'ADD INDEX idx_name (name)', 'ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)', 'RENAME TO new_table_name'" },
+        database: { type: "string", description: "Database name where the table exists (optional, uses current database if not specified)" },
       },
       required: ["table", "alterStatement"],
     },
