@@ -46,6 +46,7 @@ import {
 import path from 'path';
 import express, { Request, Response } from "express";
 import { fileURLToPath } from 'url';
+import { realpathSync } from 'fs';
 
 
 log("info", `Starting MySQL MCP server v${version}...`);
@@ -855,7 +856,8 @@ const isMainModule = () => {
     // Convert the `import.meta.url` (e.g., 'file:///path/to/file.js') to a system-standard absolute path.
     const currentModulePath = fileURLToPath(import.meta.url);
     // Resolve `process.argv[1]` (which can be a relative path) to a standard absolute path.
-    const mainScriptPath = path.resolve(process.argv[1]);
+    // Use realpathSync to resolve symlinks for proper comparison
+    const mainScriptPath = realpathSync(process.argv[1]);
     // Compare the two standardized absolute paths.
     return currentModulePath === mainScriptPath;
   }
