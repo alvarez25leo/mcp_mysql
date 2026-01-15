@@ -35,6 +35,7 @@ import {
   executeQuery,
   executeReadOnlyQuery,
   poolPromise,
+  cleanup as cleanupPool,
 } from "./src/db/index.js";
 import {
   additionalToolDefinitions,
@@ -793,13 +794,10 @@ export default function createMcpServer({
   const shutdown = async (signal: string): Promise<void> => {
     log("error", `Received ${signal}. Shutting down...`);
     try {
-      // Only attempt to close the pool if it was created
-      if (poolPromise) {
-        const pool = await poolPromise;
-        await pool.end();
-      }
+      // Cleanup pool and keep-alive
+      await cleanupPool();
     } catch (err) {
-      log("error", "Error closing pool:", err);
+      log("error", "Error during shutdown:", err);
       throw err;
     }
   };
