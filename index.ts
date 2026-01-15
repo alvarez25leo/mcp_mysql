@@ -682,12 +682,24 @@ export default function createMcpServer({
           0,
           !additionalToolResult.isError
         );
-        return additionalToolResult as { content: Array<{ type: string; text: string }>; isError: boolean };
+        // Return only content array (MCP SDK format)
+        return {
+          content: additionalToolResult.content,
+        };
       }
 
       // Handle mysql_query tool
       if (toolName === "mysql_query") {
         const sql = args.sql as string;
+        if (!sql || typeof sql !== 'string' || sql.trim().length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "Error: SQL query is required and cannot be empty"
+            }]
+          };
+        }
+        
         const result = await executeReadOnlyQuery<{ content: Array<{ type: string; text: string }>; isError: boolean }>(sql);
         const duration = performance.now() - startTime;
         
@@ -700,7 +712,11 @@ export default function createMcpServer({
           addToQueryHistory(sql, duration, 0, !result.isError);
         }
         
-        return result;
+        // Return only content array (MCP SDK format)
+        // Always return results, even if there's an error flag
+        return {
+          content: result.content,
+        };
       }
 
       throw new Error(`Unknown tool: ${toolName}`);
@@ -715,12 +731,12 @@ export default function createMcpServer({
         false,
         error.message
       );
+      // Return error in MCP SDK format (content array only)
       return {
         content: [{
           type: "text",
           text: `Error: ${error.message}`
-        }],
-        isError: true
+        }]
       };
     }
   });

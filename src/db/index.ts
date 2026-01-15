@@ -301,15 +301,32 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
         await connection.query("SET SESSION TRANSACTION READ WRITE");
       }
 
+      // Format results for better visibility
+      let resultText: string;
+      let summaryText: string;
+      
+      if (Array.isArray(rows)) {
+        if (rows.length === 0) {
+          resultText = "[]";
+          summaryText = `\n--- Query executed successfully: 0 rows returned ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
+        } else {
+          resultText = JSON.stringify(rows, null, 2);
+          summaryText = `\n--- Query executed successfully: ${rows.length} row(s) returned ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
+        }
+      } else if (rows && typeof rows === 'object') {
+        // Handle result set headers or other object responses
+        resultText = JSON.stringify(rows, null, 2);
+        summaryText = `\n--- Query executed successfully ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
+      } else {
+        resultText = String(rows || "Query executed successfully");
+        summaryText = `\n--- Execution time: ${duration.toFixed(2)} ms ---`;
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(rows, null, 2),
-          },
-          {
-            type: "text",
-            text: `Query execution time: ${duration.toFixed(2)} ms`,
+            text: resultText + summaryText,
           },
         ],
         isError: false,
@@ -318,7 +335,17 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
       // Rollback transaction on query error
       log("error", "Error executing read-only query:", error);
       await connection.rollback();
-      throw error;
+      
+      // Return error in proper format instead of throwing
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error executing query: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      } as T;
     }
   } catch (error) {
     // Ensure we rollback and reset transaction mode on any error
@@ -335,7 +362,17 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
       // Ignore errors during cleanup
       log("error", "Error during cleanup:", cleanupError);
     }
-    throw error;
+    
+    // Return error in proper format instead of throwing
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Database error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+      isError: true,
+    } as T;
   } finally {
     if (connection) {
       connection.release();
