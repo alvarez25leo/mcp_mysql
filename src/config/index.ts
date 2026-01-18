@@ -82,6 +82,7 @@ export const mcpConfig = {
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
     connectTimeout: process.env.MYSQL_CONNECT_TIMEOUT ? parseInt(process.env.MYSQL_CONNECT_TIMEOUT, 10) : 10000,
+    acquireTimeout: 10000, // 10 seconds
     authPlugins: {
       mysql_clear_password: () => () =>
         Buffer.from(
