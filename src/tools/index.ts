@@ -242,6 +242,269 @@ export async function mysqlDescribe(table: string, database?: string): Promise<{
 }
 
 // ============================================================================
+// TOOL: mysql_data_dictionary - Generate AI-friendly table documentation
+// ============================================================================
+
+export async function mysqlDataDictionary(
+  database?: string,
+  table?: string,
+  format: "json" | "markdown" = "json",
+  sampleRowsLimit: number = 3
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: database is required when MYSQL_DB is not configured",
+        }],
+        isError: true,
+      };
+    }
+
+    const tables = await executeQuery<any[]>(
+      `SELECT
+         TABLE_NAME as tableName,
+         TABLE_COMMENT as tableComment,
+         ENGINE as engine,
+         TABLE_ROWS as estimatedRows,
+         CREATE_TIME as createTime,
+         UPDATE_TIME as updateTime
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = ?
+         AND TABLE_TYPE = 'BASE TABLE'
+         ${table ? "AND TABLE_NAME = ?" : ""}
+       ORDER BY TABLE_NAME`,
+      table ? [targetDatabase, table] : [targetDatabase]
+    );
+
+    const dictionaryTables = [];
+
+    for (const tableRow of tables) {
+      const tableName = tableRow.tableName;
+
+      const columns = await executeQuery<any[]>(
+        `SELECT
+           COLUMN_NAME as name,
+           DATA_TYPE as dataType,
+           COLUMN_TYPE as columnType,
+           IS_NULLABLE as isNullable,
+           COLUMN_DEFAULT as defaultValue,
+           COLUMN_KEY as columnKey,
+           EXTRA as extra,
+           COLUMN_COMMENT as comment,
+           ORDINAL_POSITION as ordinalPosition
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = ?
+           AND TABLE_NAME = ?
+         ORDER BY ORDINAL_POSITION`,
+        [targetDatabase, tableName]
+      );
+
+      const indexesRaw = await executeQuery<any[]>(
+        `SHOW INDEX FROM \`${targetDatabase}\`.\`${tableName}\``
+      );
+
+      const foreignKeys = await executeQuery<any[]>(
+        `SELECT
+           kcu.CONSTRAINT_NAME as constraintName,
+           kcu.COLUMN_NAME as columnName,
+           kcu.REFERENCED_TABLE_SCHEMA as referencedSchema,
+           kcu.REFERENCED_TABLE_NAME as referencedTable,
+           kcu.REFERENCED_COLUMN_NAME as referencedColumn,
+           rc.UPDATE_RULE as onUpdate,
+           rc.DELETE_RULE as onDelete
+         FROM information_schema.KEY_COLUMN_USAGE kcu
+         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+           ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+          AND kcu.TABLE_SCHEMA = rc.CONSTRAINT_SCHEMA
+         WHERE kcu.TABLE_SCHEMA = ?
+           AND kcu.TABLE_NAME = ?
+           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+         ORDER BY kcu.ORDINAL_POSITION`,
+        [targetDatabase, tableName]
+      );
+
+      const sampleRows =
+        sampleRowsLimit > 0
+          ? await getTableSampleRows(targetDatabase, tableName, sampleRowsLimit)
+          : [];
+
+      const indexes = indexesRaw.reduce((acc: any[], idx: any) => {
+        const existing = acc.find((i) => i.keyName === idx.Key_name);
+        if (existing) {
+          existing.columns.push(idx.Column_name);
+        } else {
+          acc.push({
+            keyName: idx.Key_name,
+            unique: idx.Non_unique === 0,
+            indexType: idx.Index_type,
+            columns: [idx.Column_name],
+          });
+        }
+        return acc;
+      }, []);
+
+      const primaryKey = columns
+        .filter((column) => column.columnKey === "PRI")
+        .map((column) => column.name);
+
+      dictionaryTables.push({
+        table: tableName,
+        database: targetDatabase,
+        comment: tableRow.tableComment || null,
+        engine: tableRow.engine || null,
+        estimatedRows: tableRow.estimatedRows ?? null,
+        createTime: tableRow.createTime || null,
+        updateTime: tableRow.updateTime || null,
+        inferredPurpose: inferTablePurpose(tableName, columns, foreignKeys),
+        primaryKey,
+        columns,
+        indexes,
+        foreignKeys,
+        sampleRows,
+      });
+    }
+
+    const payload = {
+      database: targetDatabase,
+      totalTables: dictionaryTables.length,
+      generatedAt: new Date().toISOString(),
+      tables: dictionaryTables,
+    };
+
+    const text =
+      format === "markdown"
+        ? renderDataDictionaryMarkdown(payload)
+        : JSON.stringify(payload, null, 2);
+
+    return {
+      content: [{ type: "text", text }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_data_dictionary:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+function inferTablePurpose(
+  tableName: string,
+  columns: any[],
+  foreignKeys: any[]
+): string {
+  const normalizedTableName = tableName.toLowerCase();
+  const columnNames = columns.map((column) => String(column.name).toLowerCase());
+  const hints: string[] = [];
+
+  if (normalizedTableName.includes("user")) hints.push("stores user identities or profiles");
+  if (normalizedTableName.includes("role") || normalizedTableName.includes("permission")) hints.push("models authorization or access control");
+  if (normalizedTableName.includes("log") || normalizedTableName.includes("audit")) hints.push("captures audit trail or operational events");
+  if (normalizedTableName.includes("config") || normalizedTableName.includes("setting")) hints.push("stores configuration values");
+  if (normalizedTableName.includes("session") || normalizedTableName.includes("token")) hints.push("tracks sessions or authentication tokens");
+  if (normalizedTableName.includes("order") || normalizedTableName.includes("invoice")) hints.push("stores transactional or billing records");
+  if (normalizedTableName.includes("detail") || normalizedTableName.includes("item")) hints.push("acts as line-item detail for a parent entity");
+  if (normalizedTableName.includes("catalog") || normalizedTableName.includes("product")) hints.push("stores product or catalog information");
+  if (normalizedTableName.includes("message") || normalizedTableName.includes("notification")) hints.push("stores messages, alerts, or notifications");
+
+  if (columnNames.includes("status")) hints.push("contains lifecycle or workflow state");
+  if (columnNames.includes("created_at") || columnNames.includes("updated_at")) hints.push("tracks creation/update timestamps");
+  if (columnNames.includes("deleted_at")) hints.push("supports soft deletion");
+  if (columnNames.includes("email")) hints.push("contains contact or identity data");
+  if (columnNames.includes("password") || columnNames.includes("password_hash")) hints.push("contains authentication-related data");
+
+  if (foreignKeys.length >= 2) hints.push("links multiple business entities through foreign keys");
+  else if (foreignKeys.length === 1) hints.push("references another core entity");
+
+  if (hints.length === 0) {
+    return "general-purpose application table; infer exact role from business naming and sample rows";
+  }
+
+  return hints.slice(0, 3).join("; ");
+}
+
+function renderDataDictionaryMarkdown(payload: any): string {
+  const lines: string[] = [];
+
+  lines.push(`# MySQL Data Dictionary`);
+  lines.push("");
+  lines.push(`- Database: \`${payload.database}\``);
+  lines.push(`- Generated at: \`${payload.generatedAt}\``);
+  lines.push(`- Total tables: ${payload.totalTables}`);
+  lines.push("");
+
+  for (const table of payload.tables) {
+    lines.push(`## ${table.table}`);
+    lines.push("");
+    lines.push(`- Purpose: ${table.inferredPurpose}`);
+    lines.push(`- Engine: ${table.engine || "unknown"}`);
+    lines.push(`- Estimated rows: ${table.estimatedRows ?? "unknown"}`);
+    lines.push(`- Primary key: ${table.primaryKey.length > 0 ? table.primaryKey.map((key: string) => `\`${key}\``).join(", ") : "none"}`);
+    if (table.comment) {
+      lines.push(`- Comment: ${table.comment}`);
+    }
+    lines.push("");
+
+    lines.push(`### Columns`);
+    lines.push("");
+    lines.push(`| Name | Type | Null | Key | Default | Extra | Comment |`);
+    lines.push(`| --- | --- | --- | --- | --- | --- | --- |`);
+    for (const column of table.columns) {
+      lines.push(
+        `| \`${column.name}\` | \`${column.columnType}\` | ${column.isNullable} | ${column.columnKey || ""} | ${column.defaultValue ?? ""} | ${column.extra || ""} | ${column.comment || ""} |`
+      );
+    }
+    lines.push("");
+
+    lines.push(`### Indexes`);
+    lines.push("");
+    if (table.indexes.length === 0) {
+      lines.push(`No indexes found.`);
+    } else {
+      for (const index of table.indexes) {
+        lines.push(
+          `- \`${index.keyName}\` (${index.unique ? "unique" : "non-unique"}, ${index.indexType}): ${index.columns.map((column: string) => `\`${column}\``).join(", ")}`
+        );
+      }
+    }
+    lines.push("");
+
+    lines.push(`### Foreign Keys`);
+    lines.push("");
+    if (table.foreignKeys.length === 0) {
+      lines.push(`No foreign keys found.`);
+    } else {
+      for (const fk of table.foreignKeys) {
+        lines.push(
+          `- \`${fk.columnName}\` -> \`${fk.referencedSchema}.${fk.referencedTable}.${fk.referencedColumn}\` (${fk.onUpdate || "?"}/${fk.onDelete || "?"})`
+        );
+      }
+    }
+    lines.push("");
+
+    lines.push(`### Sample Rows`);
+    lines.push("");
+    if (table.sampleRows.length === 0) {
+      lines.push(`No sample rows available.`);
+    } else {
+      lines.push("```json");
+      lines.push(JSON.stringify(table.sampleRows, null, 2));
+      lines.push("```");
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+// ============================================================================
 // TOOL: mysql_backup - Export table data to JSON/CSV
 // ============================================================================
 
@@ -579,7 +842,11 @@ export async function mysqlExportSchema(
   }
 }
 
-async function getTableSampleRows(database: string, table: string): Promise<any[]> {
+async function getTableSampleRows(
+  database: string,
+  table: string,
+  limit: number = 3
+): Promise<any[]> {
   try {
     const orderingColumns = await executeQuery<any[]>(
       `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_KEY, EXTRA, ORDINAL_POSITION
@@ -608,8 +875,8 @@ async function getTableSampleRows(database: string, table: string): Promise<any[
       autoIncrementColumn || primaryKeyColumn || timestampColumn;
 
     const sampleSql = orderByColumn
-      ? `SELECT * FROM \`${database}\`.\`${table}\` ORDER BY \`${orderByColumn}\` DESC LIMIT 3`
-      : `SELECT * FROM \`${database}\`.\`${table}\` LIMIT 3`;
+      ? `SELECT * FROM \`${database}\`.\`${table}\` ORDER BY \`${orderByColumn}\` DESC LIMIT ${limit}`
+      : `SELECT * FROM \`${database}\`.\`${table}\` LIMIT ${limit}`;
 
     return await executeQuery<any[]>(sampleSql);
   } catch (error) {
@@ -974,6 +1241,748 @@ export async function mysqlCallProcedure(
       isError: true,
     };
   }
+}
+
+// ============================================================================
+// TOOL: mysql_document_procedure - Generate AI-friendly procedure docs
+// ============================================================================
+
+export async function mysqlDocumentProcedure(
+  procedureName: string,
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const routineResult = await executeQuery<any[]>(
+      `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${procedureName}\``
+    );
+    const routine = routineResult[0];
+    const createSql = routine?.["Create Procedure"];
+
+    if (!createSql) {
+      return {
+        content: [{ type: "text", text: `Error: procedure '${procedureName}' was not found in database '${targetDatabase}'` }],
+        isError: true,
+      };
+    }
+
+    const paramsResult = await executeQuery<any[]>(
+      `SELECT
+         PARAMETER_NAME as name,
+         PARAMETER_MODE as mode,
+         DATA_TYPE as dataType,
+         DTD_IDENTIFIER as fullType,
+         ORDINAL_POSITION as ordinalPosition
+       FROM information_schema.PARAMETERS
+       WHERE SPECIFIC_SCHEMA = ?
+         AND SPECIFIC_NAME = ?
+         AND ROUTINE_TYPE = 'PROCEDURE'
+       ORDER BY ORDINAL_POSITION`,
+      [targetDatabase, procedureName]
+    );
+
+    const metadataResult = await executeQuery<any[]>(
+      `SELECT
+         ROUTINE_SCHEMA as databaseName,
+         ROUTINE_NAME as routineName,
+         ROUTINE_COMMENT as comment,
+         SECURITY_TYPE as securityType,
+         IS_DETERMINISTIC as isDeterministic,
+         SQL_DATA_ACCESS as sqlDataAccess,
+         CREATED as createdAt,
+         LAST_ALTERED as updatedAt,
+         DEFINER as definer
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_NAME = ?
+         AND ROUTINE_TYPE = 'PROCEDURE'`,
+      [targetDatabase, procedureName]
+    );
+
+    const metadata = metadataResult[0] || {};
+    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const workflowSteps = inferProcedureWorkflow(createSql);
+    const purpose = inferProcedurePurpose(procedureName, createSql, paramsResult, referencedTables);
+
+    const tableDetails = [];
+    for (const reference of referencedTables) {
+      try {
+        const columns = await executeQuery<any[]>(
+          `SELECT
+             COLUMN_NAME as name,
+             COLUMN_TYPE as columnType,
+             COLUMN_KEY as columnKey
+           FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = ?
+             AND TABLE_NAME = ?
+           ORDER BY ORDINAL_POSITION`,
+          [reference.database, reference.table]
+        );
+
+        const sampleRows = await getTableSampleRows(reference.database, reference.table, 2);
+        tableDetails.push({
+          ...reference,
+          columns,
+          sampleRows,
+        });
+      } catch {
+        tableDetails.push({
+          ...reference,
+          columns: [],
+          sampleRows: [],
+        });
+      }
+    }
+
+    const markdown = renderProcedureDocumentationMarkdown({
+      database: targetDatabase,
+      procedureName,
+      metadata,
+      purpose,
+      parameters: paramsResult,
+      referencedTables: tableDetails,
+      workflowSteps,
+      createSql,
+      includeSourceSql,
+    });
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+    );
+    const proceduresDir = path.join(baseOutputDir, "procedures");
+    const outputFile = path.join(proceduresDir, `${procedureName}.md`);
+
+    fs.mkdirSync(proceduresDir, { recursive: true });
+    fs.writeFileSync(outputFile, markdown, "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          procedureName,
+          outputFile,
+          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
+          workflowSteps: workflowSteps.length,
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_document_procedure:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+export async function mysqlDocumentFunction(
+  functionName: string,
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const functionResult = await executeQuery<any[]>(
+      `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${functionName}\``
+    );
+    const routine = functionResult[0];
+    const createSql = routine?.["Create Function"];
+
+    if (!createSql) {
+      return {
+        content: [{ type: "text", text: `Error: function '${functionName}' was not found in database '${targetDatabase}'` }],
+        isError: true,
+      };
+    }
+
+    const paramsResult = await executeQuery<any[]>(
+      `SELECT
+         PARAMETER_NAME as name,
+         PARAMETER_MODE as mode,
+         DATA_TYPE as dataType,
+         DTD_IDENTIFIER as fullType,
+         ORDINAL_POSITION as ordinalPosition
+       FROM information_schema.PARAMETERS
+       WHERE SPECIFIC_SCHEMA = ?
+         AND SPECIFIC_NAME = ?
+         AND ROUTINE_TYPE = 'FUNCTION'
+       ORDER BY ORDINAL_POSITION`,
+      [targetDatabase, functionName]
+    );
+
+    const metadataResult = await executeQuery<any[]>(
+      `SELECT
+         ROUTINE_COMMENT as comment,
+         SECURITY_TYPE as securityType,
+         IS_DETERMINISTIC as isDeterministic,
+         SQL_DATA_ACCESS as sqlDataAccess,
+         DATA_TYPE as returnType,
+         DTD_IDENTIFIER as fullReturnType,
+         CREATED as createdAt,
+         LAST_ALTERED as updatedAt,
+         DEFINER as definer
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_NAME = ?
+         AND ROUTINE_TYPE = 'FUNCTION'`,
+      [targetDatabase, functionName]
+    );
+
+    const metadata = metadataResult[0] || {};
+    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const workflowSteps = inferProcedureWorkflow(createSql);
+    const purpose = inferFunctionPurpose(functionName, createSql, referencedTables);
+    const tableDetails = await hydrateReferencedTables(referencedTables);
+
+    const markdown = renderFunctionDocumentationMarkdown({
+      database: targetDatabase,
+      functionName,
+      metadata,
+      purpose,
+      parameters: paramsResult.filter((param) => param.name),
+      referencedTables: tableDetails,
+      workflowSteps,
+      createSql,
+      includeSourceSql,
+    });
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+    );
+    const functionsDir = path.join(baseOutputDir, "functions");
+    const outputFile = path.join(functionsDir, `${functionName}.md`);
+
+    fs.mkdirSync(functionsDir, { recursive: true });
+    fs.writeFileSync(outputFile, markdown, "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          functionName,
+          outputFile,
+          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
+          workflowSteps: workflowSteps.length,
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_document_function:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+export async function mysqlDocumentView(
+  viewName: string,
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const viewResult = await executeQuery<any[]>(
+      `SHOW CREATE VIEW \`${targetDatabase}\`.\`${viewName}\``
+    );
+    const viewData = viewResult[0];
+    const createSql = viewData?.["Create View"];
+
+    if (!createSql) {
+      return {
+        content: [{ type: "text", text: `Error: view '${viewName}' was not found in database '${targetDatabase}'` }],
+        isError: true,
+      };
+    }
+
+    const viewInfo = await executeQuery<any[]>(
+      `SELECT
+         TABLE_NAME as viewName,
+         CHECK_OPTION as checkOption,
+         IS_UPDATABLE as isUpdatable,
+         DEFINER as definer,
+         SECURITY_TYPE as securityType
+       FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = ?
+         AND TABLE_NAME = ?`,
+      [targetDatabase, viewName]
+    );
+
+    const columns = await executeQuery<any[]>(
+      `DESCRIBE \`${targetDatabase}\`.\`${viewName}\``
+    );
+
+    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const workflowSteps = inferProcedureWorkflow(createSql);
+    const purpose = inferViewPurpose(viewName, createSql, referencedTables);
+    const tableDetails = await hydrateReferencedTables(referencedTables);
+
+    const markdown = renderViewDocumentationMarkdown({
+      database: targetDatabase,
+      viewName,
+      metadata: viewInfo[0] || {},
+      purpose,
+      columns,
+      referencedTables: tableDetails,
+      workflowSteps,
+      createSql,
+      includeSourceSql,
+    });
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+    );
+    const viewsDir = path.join(baseOutputDir, "views");
+    const outputFile = path.join(viewsDir, `${viewName}.md`);
+
+    fs.mkdirSync(viewsDir, { recursive: true });
+    fs.writeFileSync(outputFile, markdown, "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          viewName,
+          outputFile,
+          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
+          workflowSteps: workflowSteps.length,
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_document_view:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+async function hydrateReferencedTables(
+  referencedTables: Array<{ database: string; table: string; operations: string[] }>
+): Promise<any[]> {
+  const tableDetails = [];
+
+  for (const reference of referencedTables) {
+    try {
+      const columns = await executeQuery<any[]>(
+        `SELECT
+           COLUMN_NAME as name,
+           COLUMN_TYPE as columnType,
+           COLUMN_KEY as columnKey
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = ?
+           AND TABLE_NAME = ?
+         ORDER BY ORDINAL_POSITION`,
+        [reference.database, reference.table]
+      );
+
+      const sampleRows = await getTableSampleRows(reference.database, reference.table, 2);
+      tableDetails.push({
+        ...reference,
+        columns,
+        sampleRows,
+      });
+    } catch {
+      tableDetails.push({
+        ...reference,
+        columns: [],
+        sampleRows: [],
+      });
+    }
+  }
+
+  return tableDetails;
+}
+
+function extractReferencedTablesFromSql(
+  sql: string,
+  defaultDatabase: string
+): Array<{ database: string; table: string; operations: string[] }> {
+  const patterns = [
+    { regex: /\bFROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "SELECT" },
+    { regex: /\bJOIN\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "JOIN" },
+    { regex: /\bUPDATE\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "UPDATE" },
+    { regex: /\bINSERT\s+INTO\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "INSERT" },
+    { regex: /\bDELETE\s+FROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "DELETE" },
+  ];
+
+  const tableMap = new Map<string, { database: string; table: string; operations: Set<string> }>();
+
+  for (const pattern of patterns) {
+    for (const match of sql.matchAll(pattern.regex)) {
+      const first = match[1];
+      const second = match[2];
+      const database = second ? first : defaultDatabase;
+      const table = second || first;
+
+      if (!table || ["select", "if", "case"].includes(table.toLowerCase())) {
+        continue;
+      }
+
+      const key = `${database}.${table}`;
+      if (!tableMap.has(key)) {
+        tableMap.set(key, {
+          database,
+          table,
+          operations: new Set<string>(),
+        });
+      }
+      tableMap.get(key)!.operations.add(pattern.operation);
+    }
+  }
+
+  return Array.from(tableMap.values()).map((item) => ({
+    database: item.database,
+    table: item.table,
+    operations: Array.from(item.operations.values()),
+  }));
+}
+
+function inferProcedureWorkflow(sql: string): string[] {
+  return sql
+    .split(";")
+    .map((step) => step.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((step) => !step.toUpperCase().startsWith("CREATE DEFINER"))
+    .slice(0, 15);
+}
+
+function explainSqlStepInSpanish(step: string): string {
+  const normalized = step.toLowerCase();
+
+  if (normalized.startsWith("select")) return `Realiza una consulta para obtener información. SQL: \`${step}\``;
+  if (normalized.startsWith("insert")) return `Inserta nuevos registros en una tabla. SQL: \`${step}\``;
+  if (normalized.startsWith("update")) return `Actualiza registros existentes. SQL: \`${step}\``;
+  if (normalized.startsWith("delete")) return `Elimina registros de una tabla. SQL: \`${step}\``;
+  if (normalized.startsWith("if")) return `Evalúa una condición para decidir el siguiente flujo. SQL: \`${step}\``;
+  if (normalized.startsWith("set")) return `Asigna valores a variables internas o de sesión. SQL: \`${step}\``;
+  if (normalized.startsWith("call")) return `Invoca otro procedimiento almacenado. SQL: \`${step}\``;
+  if (normalized.startsWith("return")) return `Devuelve un valor como resultado. SQL: \`${step}\``;
+  if (normalized.startsWith("create")) return `Define o crea el objeto SQL documentado. SQL: \`${step}\``;
+
+  return `Ejecuta la siguiente instrucción como parte del flujo interno. SQL: \`${step}\``;
+}
+
+function inferProcedurePurpose(
+  procedureName: string,
+  sql: string,
+  parameters: any[],
+  referencedTables: Array<{ table: string }>
+): string {
+  const lowerName = procedureName.toLowerCase();
+  const lowerSql = sql.toLowerCase();
+  const hints: string[] = [];
+
+  if (lowerName.includes("login") || lowerName.includes("auth")) hints.push("gestiona autenticación o validación de acceso");
+  if (lowerName.includes("create") || lowerName.includes("register")) hints.push("crea nuevos registros de negocio");
+  if (lowerName.includes("update")) hints.push("actualiza registros existentes");
+  if (lowerName.includes("delete") || lowerName.includes("remove")) hints.push("elimina o desactiva registros");
+  if (lowerName.includes("report") || lowerName.includes("summary")) hints.push("construye un resultado de reporte o resumen");
+  if (lowerName.includes("sync") || lowerName.includes("import")) hints.push("sincroniza o importa datos");
+
+  if (lowerSql.includes("transaction")) hints.push("usa control transaccional");
+  if (lowerSql.includes("password") || lowerSql.includes("token")) hints.push("toca datos sensibles de autenticación");
+  if (referencedTables.length > 1) hints.push("coordina lógica sobre múltiples tablas");
+  if (parameters.length > 0) hints.push(`recibe ${parameters.length} parámetros de entrada o salida`);
+
+  return hints.length > 0
+    ? hints.slice(0, 4).join("; ")
+    : "encapsula lógica de negocio reutilizable en base de datos";
+}
+
+function renderProcedureDocumentationMarkdown(payload: any): string {
+  const lines: string[] = [];
+
+  lines.push(`# Procedure ${payload.procedureName}`);
+  lines.push("");
+  lines.push(`- Database: \`${payload.database}\``);
+  lines.push(`- Purpose: ${payload.purpose}`);
+  lines.push(`- Security type: ${payload.metadata.securityType || "unknown"}`);
+  lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
+  lines.push(`- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`);
+  lines.push(`- Determinístico: ${payload.metadata.isDeterministic || "desconocido"}`);
+  if (payload.metadata.comment) {
+    lines.push(`- Comentario: ${payload.metadata.comment}`);
+  }
+  lines.push("");
+
+  lines.push(`## Resumen Ejecutivo`);
+  lines.push("");
+  lines.push(`Este procedimiento parece ${payload.purpose}. La documentación está pensada para que una persona o una IA pueda entender rápidamente qué hace, qué tablas toca y qué impacto podría tener cambiarlo.`);
+  lines.push("");
+
+  lines.push(`## Parámetros`);
+  lines.push("");
+  if (payload.parameters.length === 0) {
+    lines.push(`Este procedimiento no declara parámetros.`);
+  } else {
+    lines.push(`| Nombre | Modo | Tipo | Tipo Completo |`);
+    lines.push(`| --- | --- | --- | --- |`);
+    for (const parameter of payload.parameters) {
+      lines.push(`| \`${parameter.name || "(return)"}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`## Tablas Con Las Que Interactúa`);
+  lines.push("");
+  if (payload.referencedTables.length === 0) {
+    lines.push(`No se pudieron inferir referencias a tablas desde el cuerpo SQL.`);
+  } else {
+    for (const table of payload.referencedTables) {
+      lines.push(`### ${table.database}.${table.table}`);
+      lines.push("");
+      lines.push(`- Operaciones detectadas: ${table.operations.join(", ")}`);
+      lines.push(`- Columnas clave: ${table.columns.length > 0 ? table.columns.filter((column: any) => column.columnKey).map((column: any) => `\`${column.name}\``).join(", ") || "ninguna detectada" : "desconocidas"}`);
+      if (table.sampleRows.length > 0) {
+        lines.push(`- Filas de ejemplo:`);
+        lines.push("```json");
+        lines.push(JSON.stringify(table.sampleRows, null, 2));
+        lines.push("```");
+      }
+      lines.push("");
+    }
+  }
+
+  lines.push(`## Análisis Paso a Paso`);
+  lines.push("");
+  if (payload.workflowSteps.length === 0) {
+    lines.push(`No se pudieron inferir pasos del flujo.`);
+  } else {
+    payload.workflowSteps.forEach((step: string, index: number) => {
+      lines.push(`${index + 1}. ${explainSqlStepInSpanish(step)}`);
+    });
+  }
+  lines.push("");
+
+  lines.push(`## Notas Para Persona / IA`);
+  lines.push("");
+  lines.push(`- Revisa este procedimiento junto con las tablas referenciadas antes de cambiar lógica de aplicación.`);
+  lines.push(`- Si este procedimiento participa en login o flujos críticos, revisa quién lo invoca antes de cambiar parámetros o result sets.`);
+  lines.push(`- Valida efectos secundarios sobre tablas con operaciones INSERT/UPDATE/DELETE antes de desplegar cambios.`);
+  lines.push("");
+
+  if (payload.includeSourceSql) {
+    lines.push(`## SQL Fuente`);
+    lines.push("");
+    lines.push("```sql");
+    lines.push(payload.createSql);
+    lines.push("```");
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function inferFunctionPurpose(
+  functionName: string,
+  sql: string,
+  referencedTables: Array<{ table: string }>
+): string {
+  const lowerName = functionName.toLowerCase();
+  const hints: string[] = [];
+
+  if (lowerName.includes("calc") || lowerName.includes("total")) hints.push("calcula un valor derivado");
+  if (lowerName.includes("get") || lowerName.includes("find")) hints.push("obtiene un valor a partir de datos existentes");
+  if (lowerName.includes("validate") || lowerName.includes("check")) hints.push("valida una condición de negocio");
+  if (referencedTables.length > 0) hints.push("consulta tablas para producir un resultado");
+  if (sql.toLowerCase().includes("return")) hints.push("devuelve explícitamente un valor final");
+
+  return hints.length > 0
+    ? hints.slice(0, 4).join("; ")
+    : "encapsula lógica reutilizable que devuelve un valor";
+}
+
+function inferViewPurpose(
+  viewName: string,
+  sql: string,
+  referencedTables: Array<{ table: string }>
+): string {
+  const lowerName = viewName.toLowerCase();
+  const hints: string[] = [];
+
+  if (lowerName.includes("report") || lowerName.includes("summary")) hints.push("expone un resumen o reporte listo para consulta");
+  if (lowerName.includes("detail")) hints.push("presenta una vista detallada de una entidad");
+  if (lowerName.includes("active")) hints.push("filtra registros activos");
+  if (referencedTables.length > 1) hints.push("consolida datos de varias tablas");
+  if (sql.toLowerCase().includes("join")) hints.push("combina información mediante joins");
+
+  return hints.length > 0
+    ? hints.slice(0, 4).join("; ")
+    : "presenta una proyección consultable de una o más tablas";
+}
+
+function renderFunctionDocumentationMarkdown(payload: any): string {
+  const lines: string[] = [];
+
+  lines.push(`# Function ${payload.functionName}`);
+  lines.push("");
+  lines.push(`- Base de datos: \`${payload.database}\``);
+  lines.push(`- Propósito: ${payload.purpose}`);
+  lines.push(`- Tipo de retorno: \`${payload.metadata.fullReturnType || payload.metadata.returnType || "desconocido"}\``);
+  lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
+  lines.push(`- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`);
+  lines.push("");
+
+  lines.push(`## Resumen Ejecutivo`);
+  lines.push("");
+  lines.push(`Esta función parece ${payload.purpose}. La idea de este documento es que una persona o una IA entiendan rápidamente qué calcula, qué datos consulta y qué podría romperse si se modifica.`);
+  lines.push("");
+
+  lines.push(`## Parámetros`);
+  lines.push("");
+  if (payload.parameters.length === 0) {
+    lines.push(`La función no declara parámetros de entrada.`);
+  } else {
+    lines.push(`| Nombre | Modo | Tipo | Tipo Completo |`);
+    lines.push(`| --- | --- | --- | --- |`);
+    for (const parameter of payload.parameters) {
+      lines.push(`| \`${parameter.name}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`## Tablas Referenciadas`);
+  lines.push("");
+  if (payload.referencedTables.length === 0) {
+    lines.push(`No se detectaron tablas referenciadas.`);
+  } else {
+    for (const table of payload.referencedTables) {
+      lines.push(`- \`${table.database}.${table.table}\` (${table.operations.join(", ")})`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`## Análisis Paso a Paso`);
+  lines.push("");
+  if (payload.workflowSteps.length === 0) {
+    lines.push(`No se pudieron inferir pasos del flujo.`);
+  } else {
+    payload.workflowSteps.forEach((step: string, index: number) => {
+      lines.push(`${index + 1}. ${explainSqlStepInSpanish(step)}`);
+    });
+  }
+  lines.push("");
+
+  if (payload.includeSourceSql) {
+    lines.push(`## SQL Fuente`);
+    lines.push("");
+    lines.push("```sql");
+    lines.push(payload.createSql);
+    lines.push("```");
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function renderViewDocumentationMarkdown(payload: any): string {
+  const lines: string[] = [];
+
+  lines.push(`# View ${payload.viewName}`);
+  lines.push("");
+  lines.push(`- Base de datos: \`${payload.database}\``);
+  lines.push(`- Propósito: ${payload.purpose}`);
+  lines.push(`- Updatable: ${payload.metadata.isUpdatable || "desconocido"}`);
+  lines.push(`- Security type: ${payload.metadata.securityType || "desconocido"}`);
+  lines.push(`- Check option: ${payload.metadata.checkOption || "NONE"}`);
+  lines.push("");
+
+  lines.push(`## Resumen Ejecutivo`);
+  lines.push("");
+  lines.push(`Esta vista parece ${payload.purpose}. El objetivo de este documento es explicar qué proyecta, de qué tablas toma datos y cómo debería interpretarse por una persona o por otra IA.`);
+  lines.push("");
+
+  lines.push(`## Columnas Expuestas`);
+  lines.push("");
+  lines.push(`| Nombre | Tipo | Null | Key | Default | Extra |`);
+  lines.push(`| --- | --- | --- | --- | --- | --- |`);
+  for (const column of payload.columns) {
+    lines.push(`| \`${column.Field}\` | \`${column.Type}\` | ${column.Null} | ${column.Key || ""} | ${column.Default ?? ""} | ${column.Extra || ""} |`);
+  }
+  lines.push("");
+
+  lines.push(`## Tablas Fuente`);
+  lines.push("");
+  if (payload.referencedTables.length === 0) {
+    lines.push(`No se detectaron tablas fuente.`);
+  } else {
+    for (const table of payload.referencedTables) {
+      lines.push(`### ${table.database}.${table.table}`);
+      lines.push("");
+      lines.push(`- Operaciones detectadas: ${table.operations.join(", ")}`);
+      if (table.sampleRows.length > 0) {
+        lines.push(`- Filas de ejemplo:`);
+        lines.push("```json");
+        lines.push(JSON.stringify(table.sampleRows, null, 2));
+        lines.push("```");
+      }
+      lines.push("");
+    }
+  }
+
+  lines.push(`## Análisis Paso a Paso`);
+  lines.push("");
+  if (payload.workflowSteps.length === 0) {
+    lines.push(`No se pudieron inferir pasos del flujo.`);
+  } else {
+    payload.workflowSteps.forEach((step: string, index: number) => {
+      lines.push(`${index + 1}. ${explainSqlStepInSpanish(step)}`);
+    });
+  }
+  lines.push("");
+
+  if (payload.includeSourceSql) {
+    lines.push(`## SQL Fuente`);
+    lines.push("");
+    lines.push("```sql");
+    lines.push(payload.createSql);
+    lines.push("```");
+    lines.push("");
+  }
+
+  return lines.join("\n");
 }
 
 // ============================================================================
@@ -1824,6 +2833,19 @@ export const additionalToolDefinitions = [
     },
   },
   {
+    name: "mysql_data_dictionary",
+    description: "Generate AI-friendly documentation for one table or a full database. Returns per-table columns, primary key, foreign keys, indexes, sample rows, and an inferred purpose summary. Supports JSON or Markdown output so an agent can build context quickly before writing queries or code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "Database name to inspect. Optional if MYSQL_DB is configured." },
+        table: { type: "string", description: "Specific table to document. If omitted, documents all base tables in the database." },
+        format: { type: "string", enum: ["json", "markdown"], description: "Output format. Use 'json' for structured consumption or 'markdown' for readable documentation." },
+        sampleRowsLimit: { type: "number", description: "How many recent sample rows to include per table. Default: 3. Use 0 to disable samples." },
+      },
+    },
+  },
+  {
     name: "mysql_backup",
     description: "Export table data to JSON or CSV format. Use this tool to backup data, export for analysis, or transfer data between systems. Supports filtering with WHERE clauses and limiting row count. Returns the exported data in the specified format.",
     inputSchema: {
@@ -1923,6 +2945,48 @@ export const additionalToolDefinitions = [
         database: { type: "string", description: "Database name where the procedure exists (optional, uses current database if not specified)" },
       },
       required: ["procedureName"],
+    },
+  },
+  {
+    name: "mysql_document_procedure",
+    description: "Genera un documento Markdown profesional en espanol para un stored procedure y lo guarda en disco. Incluye proposito inferido, parametros, tablas relacionadas, filas de ejemplo, analisis paso a paso y opcionalmente el SQL fuente. Es util para que una persona o una IA entiendan rapido la logica del procedimiento.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        procedureName: { type: "string", description: "Stored procedure name to document." },
+        database: { type: "string", description: "Database where the procedure exists. Optional if MYSQL_DB is configured." },
+        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
+        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE PROCEDURE SQL in the generated Markdown. Default: true." },
+      },
+      required: ["procedureName"],
+    },
+  },
+  {
+    name: "mysql_document_function",
+    description: "Genera un documento Markdown profesional en espanol para una function de MySQL y lo guarda en disco. Incluye proposito inferido, parametros, tipo de retorno, tablas consultadas, analisis paso a paso y SQL fuente opcional.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        functionName: { type: "string", description: "Function name to document." },
+        database: { type: "string", description: "Database where the function exists. Optional if MYSQL_DB is configured." },
+        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
+        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE FUNCTION SQL in the generated Markdown. Default: true." },
+      },
+      required: ["functionName"],
+    },
+  },
+  {
+    name: "mysql_document_view",
+    description: "Genera un documento Markdown profesional en espanol para una view y lo guarda en disco. Incluye columnas expuestas, tablas fuente, filas de ejemplo, proposito inferido, analisis paso a paso y SQL fuente opcional.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        viewName: { type: "string", description: "View name to document." },
+        database: { type: "string", description: "Database where the view exists. Optional if MYSQL_DB is configured." },
+        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
+        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE VIEW SQL in the generated Markdown. Default: true." },
+      },
+      required: ["viewName"],
     },
   },
   {
@@ -2088,6 +3152,14 @@ export async function handleAdditionalTool(
     
     case "mysql_describe":
       return mysqlDescribe(args.table, args.database);
+
+    case "mysql_data_dictionary":
+      return mysqlDataDictionary(
+        args.database,
+        args.table,
+        args.format,
+        args.sampleRowsLimit
+      );
     
     case "mysql_backup":
       return mysqlBackup(args.table, args.format, args.database, args.whereClause, args.limit);
@@ -2120,6 +3192,30 @@ export async function handleAdditionalTool(
     
     case "mysql_call_procedure":
       return mysqlCallProcedure(args.procedureName, args.params || [], args.database);
+
+    case "mysql_document_procedure":
+      return mysqlDocumentProcedure(
+        args.procedureName,
+        args.database,
+        args.outputDir,
+        args.includeSourceSql
+      );
+
+    case "mysql_document_function":
+      return mysqlDocumentFunction(
+        args.functionName,
+        args.database,
+        args.outputDir,
+        args.includeSourceSql
+      );
+
+    case "mysql_document_view":
+      return mysqlDocumentView(
+        args.viewName,
+        args.database,
+        args.outputDir,
+        args.includeSourceSql
+      );
     
     case "mysql_show_views":
       return mysqlShowViews(args.database, args.viewName);
