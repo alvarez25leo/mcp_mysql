@@ -315,7 +315,7 @@ export async function mysqlBackup(
 
 export async function mysqlExportSchema(
   database?: string,
-  outputPath?: string,
+  outputDir?: string,
   includeDatabaseStatement: boolean = true
 ): Promise<{
   content: Array<{ type: string; text: string }>;
@@ -333,20 +333,29 @@ export async function mysqlExportSchema(
       };
     }
 
-    const configuredOutputPath = process.env.MYSQL_SCHEMA_EXPORT_PATH;
-    const finalOutputPath = outputPath || configuredOutputPath;
-    if (!finalOutputPath) {
+    const configuredOutputDir =
+      process.env.MYSQL_SCHEMA_EXPORT_DIR || process.env.MYSQL_SCHEMA_EXPORT_PATH;
+    const finalOutputDir = outputDir || configuredOutputDir;
+    if (!finalOutputDir) {
       return {
         content: [{
           type: "text",
-          text: "Error: outputPath is required or set MYSQL_SCHEMA_EXPORT_PATH",
+          text: "Error: outputDir is required or set MYSQL_SCHEMA_EXPORT_DIR",
         }],
         isError: true,
       };
     }
 
-    const resolvedOutputPath = path.resolve(finalOutputPath);
-    const statements: string[] = [];
+    const resolvedOutputDir = path.resolve(finalOutputDir);
+    const schemaStatements: string[] = [];
+    const proceduresDir = path.join(resolvedOutputDir, "procedures");
+    const functionsDir = path.join(resolvedOutputDir, "functions");
+    const viewsDir = path.join(resolvedOutputDir, "views");
+
+    fs.mkdirSync(resolvedOutputDir, { recursive: true });
+    fs.mkdirSync(proceduresDir, { recursive: true });
+    fs.mkdirSync(functionsDir, { recursive: true });
+    fs.mkdirSync(viewsDir, { recursive: true });
 
     if (includeDatabaseStatement) {
       const createDatabaseResult = await executeQuery<any[]>(
@@ -357,10 +366,10 @@ export async function mysqlExportSchema(
         createDatabaseResult[0]?.["CREATE DATABASE"];
 
       if (createDatabaseStatement) {
-        statements.push(`${createDatabaseStatement};`);
+        schemaStatements.push(`${createDatabaseStatement};`);
       }
 
-      statements.push(`USE \`${targetDatabase}\`;`);
+      schemaStatements.push(`USE \`${targetDatabase}\`;`);
     }
 
     const tables = await executeQuery<any[]>(
@@ -381,8 +390,8 @@ export async function mysqlExportSchema(
         createTableResult[0]?.["CREATE TABLE"];
 
       if (createTableStatement) {
-        statements.push(`DROP TABLE IF EXISTS \`${table.TABLE_NAME}\`;`);
-        statements.push(`${createTableStatement};`);
+        schemaStatements.push(`DROP TABLE IF EXISTS \`${table.TABLE_NAME}\`;`);
+        schemaStatements.push(`${createTableStatement};`);
       }
     }
 
@@ -403,8 +412,15 @@ export async function mysqlExportSchema(
         createViewResult[0]?.["CREATE VIEW"];
 
       if (createViewStatement) {
-        statements.push(`DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`);
-        statements.push(`${createViewStatement};`);
+        const viewFilePath = path.join(viewsDir, `${view.TABLE_NAME}.sql`);
+        const viewSql = [
+          includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
+          `DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`,
+          `${createViewStatement};`,
+          "",
+        ].filter(Boolean).join("\n\n");
+
+        fs.writeFileSync(viewFilePath, `${viewSql}\n`, "utf8");
       }
     }
 
@@ -425,10 +441,20 @@ export async function mysqlExportSchema(
           createProcedureResult[0]?.["Create Procedure"];
 
         if (createProcedureStatement) {
-          statements.push(`DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\`;`);
-          statements.push("DELIMITER ;;");
-          statements.push(`${createProcedureStatement};;`);
-          statements.push("DELIMITER ;");
+          const procedureFilePath = path.join(
+            proceduresDir,
+            `${routine.ROUTINE_NAME}.sql`
+          );
+          const procedureSql = [
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
+            `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\`;`,
+            "DELIMITER ;;",
+            `${createProcedureStatement};;`,
+            "DELIMITER ;",
+            "",
+          ].filter(Boolean).join("\n\n");
+
+          fs.writeFileSync(procedureFilePath, `${procedureSql}\n`, "utf8");
         }
       } else if (routine.ROUTINE_TYPE === "FUNCTION") {
         const createFunctionResult = await executeQuery<any[]>(
@@ -438,10 +464,20 @@ export async function mysqlExportSchema(
           createFunctionResult[0]?.["Create Function"];
 
         if (createFunctionStatement) {
-          statements.push(`DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\`;`);
-          statements.push("DELIMITER ;;");
-          statements.push(`${createFunctionStatement};;`);
-          statements.push("DELIMITER ;");
+          const functionFilePath = path.join(
+            functionsDir,
+            `${routine.ROUTINE_NAME}.sql`
+          );
+          const functionSql = [
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
+            `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\`;`,
+            "DELIMITER ;;",
+            `${createFunctionStatement};;`,
+            "DELIMITER ;",
+            "",
+          ].filter(Boolean).join("\n\n");
+
+          fs.writeFileSync(functionFilePath, `${functionSql}\n`, "utf8");
         }
       }
     }
@@ -463,10 +499,10 @@ export async function mysqlExportSchema(
         createTriggerResult[0]?.["Create Trigger"];
 
       if (createTriggerStatement) {
-        statements.push(`DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\`;`);
-        statements.push("DELIMITER ;;");
-        statements.push(`${createTriggerStatement};;`);
-        statements.push("DELIMITER ;");
+        schemaStatements.push(`DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\`;`);
+        schemaStatements.push("DELIMITER ;;");
+        schemaStatements.push(`${createTriggerStatement};;`);
+        schemaStatements.push("DELIMITER ;");
       }
     }
 
@@ -486,22 +522,26 @@ export async function mysqlExportSchema(
         createEventResult[0]?.["Create Event"];
 
       if (createEventStatement) {
-        statements.push(`DROP EVENT IF EXISTS \`${event.EVENT_NAME}\`;`);
-        statements.push("DELIMITER ;;");
-        statements.push(`${createEventStatement};;`);
-        statements.push("DELIMITER ;");
+        schemaStatements.push(`DROP EVENT IF EXISTS \`${event.EVENT_NAME}\`;`);
+        schemaStatements.push("DELIMITER ;;");
+        schemaStatements.push(`${createEventStatement};;`);
+        schemaStatements.push("DELIMITER ;");
       }
     }
 
-    fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
-    fs.writeFileSync(resolvedOutputPath, statements.join("\n\n") + "\n", "utf8");
+    const schemaFilePath = path.join(resolvedOutputDir, "schema.sql");
+    fs.writeFileSync(schemaFilePath, schemaStatements.join("\n\n") + "\n", "utf8");
 
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
           database: targetDatabase,
-          outputPath: resolvedOutputPath,
+          outputDir: resolvedOutputDir,
+          schemaFile: schemaFilePath,
+          proceduresDir,
+          functionsDir,
+          viewsDir,
           tables: tables.length,
           views: views.length,
           routines: routines.length,
@@ -1742,12 +1782,13 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_export_schema",
-    description: "Export the full schema of a MySQL database to a .sql file on disk. Generates CREATE DATABASE, USE, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, CREATE FUNCTION, CREATE TRIGGER, and CREATE EVENT statements for the selected database. The file path can be provided directly or taken from MYSQL_SCHEMA_EXPORT_PATH.",
+    description: "Export the schema of a MySQL database into a folder on disk. Creates a root schema.sql with database, tables, triggers, and events, plus subfolders named procedures, functions, and views with one .sql file per object. The target folder can be provided directly or taken from MYSQL_SCHEMA_EXPORT_DIR.",
     inputSchema: {
       type: "object",
       properties: {
         database: { type: "string", description: "Database name to export. Optional if MYSQL_DB is configured." },
-        outputPath: { type: "string", description: "Absolute or relative path where the .sql file will be written. Optional if MYSQL_SCHEMA_EXPORT_PATH is configured." },
+        outputDir: { type: "string", description: "Absolute or relative folder path where schema.sql and the subfolders procedures/, functions/, and views/ will be created. Optional if MYSQL_SCHEMA_EXPORT_DIR is configured." },
+        outputPath: { type: "string", description: "Backward-compatible alias of outputDir." },
         includeDatabaseStatement: { type: "boolean", description: "If true, includes CREATE DATABASE and USE statements at the top of the file. Default: true." },
       },
     },
@@ -1994,7 +2035,11 @@ export async function handleAdditionalTool(
       return mysqlBackup(args.table, args.format, args.database, args.whereClause, args.limit);
 
     case "mysql_export_schema":
-      return mysqlExportSchema(args.database, args.outputPath, args.includeDatabaseStatement);
+      return mysqlExportSchema(
+        args.database,
+        args.outputDir || args.outputPath,
+        args.includeDatabaseStatement
+      );
     
     case "mysql_import":
       return mysqlImport(args.table, args.data, args.database, args.mode);
