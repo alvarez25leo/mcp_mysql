@@ -1313,38 +1313,20 @@ export async function mysqlDocumentProcedure(
 
     const metadata = metadataResult[0] || {};
     const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const referencedFunctions = await extractReferencedFunctionsFromSql(
+      createSql,
+      targetDatabase,
+      procedureName
+    );
     const workflowSteps = inferProcedureWorkflow(createSql);
-    const purpose = inferProcedurePurpose(procedureName, createSql, paramsResult, referencedTables);
+    const purpose = inferProcedurePurpose(
+      procedureName,
+      createSql,
+      paramsResult,
+      referencedTables
+    );
 
-    const tableDetails = [];
-    for (const reference of referencedTables) {
-      try {
-        const columns = await executeQuery<any[]>(
-          `SELECT
-             COLUMN_NAME as name,
-             COLUMN_TYPE as columnType,
-             COLUMN_KEY as columnKey
-           FROM information_schema.COLUMNS
-           WHERE TABLE_SCHEMA = ?
-             AND TABLE_NAME = ?
-           ORDER BY ORDINAL_POSITION`,
-          [reference.database, reference.table]
-        );
-
-        const sampleRows = await getTableSampleRows(reference.database, reference.table, 2);
-        tableDetails.push({
-          ...reference,
-          columns,
-          sampleRows,
-        });
-      } catch {
-        tableDetails.push({
-          ...reference,
-          columns: [],
-          sampleRows: [],
-        });
-      }
-    }
+    const tableDetails = await hydrateReferencedTables(referencedTables);
 
     const markdown = renderProcedureDocumentationMarkdown({
       database: targetDatabase,
@@ -1353,6 +1335,7 @@ export async function mysqlDocumentProcedure(
       purpose,
       parameters: paramsResult,
       referencedTables: tableDetails,
+      referencedFunctions,
       workflowSteps,
       createSql,
       includeSourceSql,
@@ -1598,6 +1581,273 @@ export async function mysqlDocumentView(
   }
 }
 
+export async function mysqlExportProcedureDocs(
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+    );
+    const proceduresDir = path.join(baseOutputDir, "procedures");
+    fs.mkdirSync(proceduresDir, { recursive: true });
+
+    const procedures = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_TYPE = 'PROCEDURE'
+       ORDER BY ROUTINE_NAME`,
+      [targetDatabase]
+    );
+
+    const generated: string[] = [];
+    const errors: string[] = [];
+
+    for (const procedure of procedures) {
+      const result = await mysqlDocumentProcedure(
+        procedure.name,
+        targetDatabase,
+        baseOutputDir,
+        includeSourceSql
+      );
+
+      if (result.isError) {
+        errors.push(procedure.name);
+        continue;
+      }
+
+      const payload = JSON.parse(result.content[0].text);
+      generated.push(payload.outputFile);
+    }
+
+    const structureGuide = [
+      "# Estructura de Documentacion de Procedures",
+      "",
+      "Cada archivo generado debe seguir esta estructura:",
+      "",
+      "1. Resumen Ejecutivo",
+      "2. Parametros",
+      "3. Tablas Con Las Que Interactua",
+      "4. Funciones Auxiliares Utilizadas",
+      "5. Analisis Paso a Paso",
+      "6. Desglose Detallado de la Logica",
+      "7. Diagrama de Flujo",
+      "8. Notas Para Persona / IA",
+      "9. SQL Fuente",
+      "",
+      "Regla de trabajo:",
+      "",
+      "- El proceso documenta un procedure completo antes de pasar al siguiente.",
+      "- Cada archivo se reescribe con la version mas reciente de la documentacion.",
+      "- La explicacion debe estar en espanol y orientada a entendimiento humano y de IA.",
+      "",
+      "Procedures generados:",
+      "",
+      ...generated.map((file) => `- ${file}`),
+    ].join("\n");
+
+    const structureFile = path.join(proceduresDir, "README.md");
+    fs.writeFileSync(structureFile, structureGuide + "\n", "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          outputDir: proceduresDir,
+          generatedCount: generated.length,
+          generated,
+          errors,
+          structureFile,
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_export_procedure_docs:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+export async function mysqlGenerateAiDocs(
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true,
+  includeDataDictionary: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+    );
+    fs.mkdirSync(baseOutputDir, { recursive: true });
+
+    const summary: {
+      database: string;
+      outputDir: string;
+      generated: string[];
+      errors: string[];
+    } = {
+      database: targetDatabase,
+      outputDir: baseOutputDir,
+      generated: [],
+      errors: [],
+    };
+
+    if (includeDataDictionary) {
+      const dictionaryResult = await mysqlDataDictionary(
+        targetDatabase,
+        undefined,
+        "markdown",
+        3
+      );
+
+      if (dictionaryResult.isError) {
+        summary.errors.push("data-dictionary");
+      } else {
+        const dictionaryFile = path.join(baseOutputDir, "data-dictionary.md");
+        fs.writeFileSync(dictionaryFile, dictionaryResult.content[0].text, "utf8");
+        summary.generated.push(dictionaryFile);
+      }
+    }
+
+    const procedures = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_TYPE = 'PROCEDURE'
+       ORDER BY ROUTINE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const procedure of procedures) {
+      const result = await mysqlDocumentProcedure(
+        procedure.name,
+        targetDatabase,
+        baseOutputDir,
+        includeSourceSql
+      );
+
+      if (result.isError) {
+        summary.errors.push(`procedure:${procedure.name}`);
+      } else {
+        const payload = JSON.parse(result.content[0].text);
+        summary.generated.push(payload.outputFile);
+      }
+    }
+
+    const functions = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_TYPE = 'FUNCTION'
+       ORDER BY ROUTINE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const fn of functions) {
+      const result = await mysqlDocumentFunction(
+        fn.name,
+        targetDatabase,
+        baseOutputDir,
+        includeSourceSql
+      );
+
+      if (result.isError) {
+        summary.errors.push(`function:${fn.name}`);
+      } else {
+        const payload = JSON.parse(result.content[0].text);
+        summary.generated.push(payload.outputFile);
+      }
+    }
+
+    const views = await executeQuery<any[]>(
+      `SELECT TABLE_NAME as name
+       FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = ?
+       ORDER BY TABLE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const view of views) {
+      const result = await mysqlDocumentView(
+        view.name,
+        targetDatabase,
+        baseOutputDir,
+        includeSourceSql
+      );
+
+      if (result.isError) {
+        summary.errors.push(`view:${view.name}`);
+      } else {
+        const payload = JSON.parse(result.content[0].text);
+        summary.generated.push(payload.outputFile);
+      }
+    }
+
+    const indexLines = [
+      `# AI Docs Index`,
+      ``,
+      `- Base de datos: \`${targetDatabase}\``,
+      `- Carpeta: \`${baseOutputDir}\``,
+      `- Archivos generados: ${summary.generated.length}`,
+      `- Errores: ${summary.errors.length}`,
+      ``,
+      `## Archivos`,
+      ``,
+      ...summary.generated.map((file) => `- ${file}`),
+    ];
+
+    if (summary.errors.length > 0) {
+      indexLines.push("");
+      indexLines.push("## Errores");
+      indexLines.push("");
+      indexLines.push(...summary.errors.map((error) => `- ${error}`));
+    }
+
+    const indexFile = path.join(baseOutputDir, "README.md");
+    fs.writeFileSync(indexFile, indexLines.join("\n") + "\n", "utf8");
+    summary.generated.push(indexFile);
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_generate_ai_docs:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
 async function hydrateReferencedTables(
   referencedTables: Array<{ database: string; table: string; operations: string[] }>
 ): Promise<any[]> {
@@ -1679,6 +1929,90 @@ function extractReferencedTablesFromSql(
   }));
 }
 
+async function extractReferencedFunctionsFromSql(
+  sql: string,
+  defaultDatabase: string,
+  currentProcedureName?: string
+): Promise<Array<{
+  database: string;
+  functionName: string;
+  purpose: string;
+  createSql: string | null;
+}>> {
+  const candidates = new Set<string>();
+  const regex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+  const reservedWords = new Set([
+    "if",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "concat",
+    "coalesce",
+    "isnull",
+    "substring",
+    "now",
+    "date",
+    "cast",
+    "convert",
+    "select",
+    "values",
+    "exists",
+    "case",
+    "in",
+  ]);
+
+  for (const match of sql.matchAll(regex)) {
+    const name = match[1];
+    if (!name) continue;
+    const normalized = name.toLowerCase();
+    if (reservedWords.has(normalized)) continue;
+    if (currentProcedureName && normalized === currentProcedureName.toLowerCase()) continue;
+    candidates.add(name);
+  }
+
+  const documentedFunctions = [];
+
+  for (const candidate of candidates) {
+    try {
+      const routineInfo = await executeQuery<any[]>(
+        `SELECT
+           ROUTINE_SCHEMA as databaseName,
+           ROUTINE_NAME as routineName,
+           ROUTINE_COMMENT as comment
+         FROM information_schema.ROUTINES
+         WHERE ROUTINE_TYPE = 'FUNCTION'
+           AND ROUTINE_NAME = ?
+           AND ROUTINE_SCHEMA = ?`,
+        [candidate, defaultDatabase]
+      );
+
+      if (!routineInfo[0]) continue;
+
+      const createResult = await executeQuery<any[]>(
+        `SHOW CREATE FUNCTION \`${defaultDatabase}\`.\`${candidate}\``
+      );
+      const createSql = createResult[0]?.["Create Function"] || null;
+
+      documentedFunctions.push({
+        database: defaultDatabase,
+        functionName: candidate,
+        purpose: inferFunctionPurpose(
+          candidate,
+          createSql || "",
+          extractReferencedTablesFromSql(createSql || "", defaultDatabase)
+        ),
+        createSql,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return documentedFunctions;
+}
+
 function inferProcedureWorkflow(sql: string): string[] {
   return sql
     .split(";")
@@ -1691,17 +2025,75 @@ function inferProcedureWorkflow(sql: string): string[] {
 function explainSqlStepInSpanish(step: string): string {
   const normalized = step.toLowerCase();
 
-  if (normalized.startsWith("select")) return `Realiza una consulta para obtener información. SQL: \`${step}\``;
-  if (normalized.startsWith("insert")) return `Inserta nuevos registros en una tabla. SQL: \`${step}\``;
-  if (normalized.startsWith("update")) return `Actualiza registros existentes. SQL: \`${step}\``;
-  if (normalized.startsWith("delete")) return `Elimina registros de una tabla. SQL: \`${step}\``;
-  if (normalized.startsWith("if")) return `Evalúa una condición para decidir el siguiente flujo. SQL: \`${step}\``;
-  if (normalized.startsWith("set")) return `Asigna valores a variables internas o de sesión. SQL: \`${step}\``;
-  if (normalized.startsWith("call")) return `Invoca otro procedimiento almacenado. SQL: \`${step}\``;
-  if (normalized.startsWith("return")) return `Devuelve un valor como resultado. SQL: \`${step}\``;
-  if (normalized.startsWith("create")) return `Define o crea el objeto SQL documentado. SQL: \`${step}\``;
+  if (normalized.startsWith("select")) return `Consulta datos para validar condiciones, buscar registros o construir el resultado que el procedimiento necesita en este punto. SQL: \`${step}\``;
+  if (normalized.startsWith("insert")) return `Inserta nuevos registros, por lo que este paso genera un efecto persistente en la base de datos y puede impactar procesos posteriores. SQL: \`${step}\``;
+  if (normalized.startsWith("update")) return `Actualiza registros existentes para reflejar un nuevo estado, resultado de negocio o cambio operativo. SQL: \`${step}\``;
+  if (normalized.startsWith("delete")) return `Elimina registros o limpia información previa; este paso debe revisarse con cuidado por su impacto destructivo. SQL: \`${step}\``;
+  if (normalized.startsWith("if")) return `Evalúa una condición de negocio para decidir si continúa por una rama, detiene el flujo o cambia el comportamiento del procedimiento. SQL: \`${step}\``;
+  if (normalized.startsWith("set")) return `Asigna o recalcula variables internas que luego serán usadas en validaciones, decisiones o escritura de datos. SQL: \`${step}\``;
+  if (normalized.startsWith("call")) return `Invoca otro procedimiento almacenado, por lo que este paso delega parte de la lógica y puede introducir efectos secundarios adicionales. SQL: \`${step}\``;
+  if (normalized.startsWith("return")) return `Devuelve un valor o un estado final para el consumidor del procedimiento. SQL: \`${step}\``;
+  if (normalized.startsWith("create")) return `Define la estructura del objeto SQL o parte de su comportamiento declarativo. SQL: \`${step}\``;
 
-  return `Ejecuta la siguiente instrucción como parte del flujo interno. SQL: \`${step}\``;
+  return `Ejecuta una instrucción interna del procedimiento. Conviene revisarla dentro del contexto del paso anterior y del siguiente para entender su efecto completo. SQL: \`${step}\``;
+}
+
+function getProcedureStepLabel(step: string): string {
+  const normalized = step.toLowerCase();
+
+  if (normalized.startsWith("select")) return "Consulta";
+  if (normalized.startsWith("insert")) return "Inserción";
+  if (normalized.startsWith("update")) return "Actualización";
+  if (normalized.startsWith("delete")) return "Eliminación";
+  if (normalized.startsWith("if")) return "Decisión";
+  if (normalized.startsWith("set")) return "Asignación";
+  if (normalized.startsWith("call")) return "Llamada";
+  if (normalized.startsWith("return")) return "Retorno";
+
+  return "Paso";
+}
+
+function buildProcedureFlowDiagram(steps: string[]): string {
+  const lines = ["flowchart TD"];
+
+  if (steps.length === 0) {
+    lines.push('  A["Inicio"] --> B["Sin pasos inferidos"]');
+    return lines.join("\n");
+  }
+
+  lines.push('  A["Inicio"]');
+  steps.forEach((step, index) => {
+    const nodeId = `N${index + 1}`;
+    const label = `${index + 1}. ${getProcedureStepLabel(step)}`;
+    lines.push(`  ${nodeId}["${label}"]`);
+    lines.push(index === 0 ? `  A --> ${nodeId}` : `  N${index} --> ${nodeId}`);
+  });
+  lines.push(`  N${steps.length} --> Z["Fin"]`);
+
+  return lines.join("\n");
+}
+
+function buildProcedureDetailedAnalysis(steps: string[]): string[] {
+  const lines: string[] = [];
+
+  if (steps.length === 0) {
+    lines.push("No se pudieron inferir etapas detalladas del procedimiento.");
+    return lines;
+  }
+
+  steps.forEach((step, index) => {
+    lines.push(`### Etapa ${index + 1}: ${getProcedureStepLabel(step)}`);
+    lines.push("");
+    lines.push(explainSqlStepInSpanish(step));
+    lines.push("");
+    lines.push(`SQL analizado:`);
+    lines.push("```sql");
+    lines.push(step);
+    lines.push("```");
+    lines.push("");
+  });
+
+  return lines;
 }
 
 function inferProcedurePurpose(
@@ -1733,6 +2125,8 @@ function inferProcedurePurpose(
 
 function renderProcedureDocumentationMarkdown(payload: any): string {
   const lines: string[] = [];
+  const detailedAnalysis = buildProcedureDetailedAnalysis(payload.workflowSteps);
+  const flowDiagram = buildProcedureFlowDiagram(payload.workflowSteps);
 
   lines.push(`# Procedure ${payload.procedureName}`);
   lines.push("");
@@ -1794,6 +2188,18 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
       lines.push(`${index + 1}. ${explainSqlStepInSpanish(step)}`);
     });
   }
+  lines.push("");
+
+  lines.push(`## Desglose Detallado de la Lógica`);
+  lines.push("");
+  lines.push(...detailedAnalysis);
+  lines.push("");
+
+  lines.push(`## Diagrama de Flujo`);
+  lines.push("");
+  lines.push("```mermaid");
+  lines.push(flowDiagram);
+  lines.push("```");
   lines.push("");
 
   lines.push(`## Notas Para Persona / IA`);
@@ -1890,6 +2296,24 @@ function renderFunctionDocumentationMarkdown(payload: any): string {
   } else {
     for (const table of payload.referencedTables) {
       lines.push(`- \`${table.database}.${table.table}\` (${table.operations.join(", ")})`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`## Funciones Auxiliares Utilizadas`);
+  lines.push("");
+  if (!payload.referencedFunctions || payload.referencedFunctions.length === 0) {
+    lines.push(`No se detectaron funciones auxiliares referenciadas dentro del procedimiento.`);
+  } else {
+    for (const fn of payload.referencedFunctions) {
+      lines.push(`### ${fn.database}.${fn.functionName}`);
+      lines.push("");
+      lines.push(`- Uso inferido: ${fn.purpose}`);
+      lines.push(`- Rol dentro del procedimiento: ayuda a encapsular una parte de la lógica para reutilizar cálculos, validaciones o transformaciones sin duplicar código.`);
+      if (fn.createSql) {
+        lines.push(`- Definición resumida: se detectó una función almacenada que puede ser clave para entender el resultado final del procedimiento.`);
+      }
+      lines.push("");
     }
   }
   lines.push("");
@@ -2990,6 +3414,31 @@ export const additionalToolDefinitions = [
     },
   },
   {
+    name: "mysql_export_procedure_docs",
+    description: "Exporta la documentacion Markdown de todos los stored procedures de una base de datos. Procesa cada SP uno por uno, termina su archivo antes de pasar al siguiente, reescribe el .md con la version actualizada y deja un README dentro de procedures/ explicando la estructura usada para documentar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "Database name to document. Optional if MYSQL_DB is configured." },
+        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
+        includeSourceSql: { type: "boolean", description: "If true, includes source SQL in each generated procedure Markdown. Default: true." },
+      },
+    },
+  },
+  {
+    name: "mysql_generate_ai_docs",
+    description: "Genera documentacion completa de una base de datos en forma secuencial. Primero puede crear el data dictionary y luego documenta procedures, functions y views uno por uno, terminando cada archivo detallado antes de pasar al siguiente. Guarda todo en disco y crea un README indice con el resumen.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "Database name to document. Optional if MYSQL_DB is configured." },
+        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
+        includeSourceSql: { type: "boolean", description: "If true, includes source SQL in generated Markdown files. Default: true." },
+        includeDataDictionary: { type: "boolean", description: "If true, generates data-dictionary.md before documenting routines and views. Default: true." },
+      },
+    },
+  },
+  {
     name: "mysql_show_views",
     description: "List all database views or get detailed information about a specific view. Use this tool to discover available views, understand view definitions, check if views are updatable, or see view metadata. Views are virtual tables based on SELECT queries. If viewName is provided, returns detailed view structure including columns and definition.",
     inputSchema: {
@@ -3215,6 +3664,21 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql
+      );
+
+    case "mysql_export_procedure_docs":
+      return mysqlExportProcedureDocs(
+        args.database,
+        args.outputDir,
+        args.includeSourceSql
+      );
+
+    case "mysql_generate_ai_docs":
+      return mysqlGenerateAiDocs(
+        args.database,
+        args.outputDir,
+        args.includeSourceSql,
+        args.includeDataDictionary
       );
     
     case "mysql_show_views":
