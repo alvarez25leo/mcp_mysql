@@ -346,6 +346,8 @@ export async function mysqlExportSchema(
       };
     }
 
+    const includeSampleRows =
+      process.env.MYSQL_SCHEMA_EXPORT_INCLUDE_SAMPLE_ROWS === "true";
     const resolvedOutputDir = path.resolve(finalOutputDir);
     const schemaStatements: string[] = [];
     const proceduresDir = path.join(resolvedOutputDir, "procedures");
@@ -392,6 +394,22 @@ export async function mysqlExportSchema(
       if (createTableStatement) {
         schemaStatements.push(`DROP TABLE IF EXISTS \`${table.TABLE_NAME}\`;`);
         schemaStatements.push(`${createTableStatement};`);
+
+        if (includeSampleRows) {
+          const sampleRows = await getTableSampleRows(targetDatabase, table.TABLE_NAME);
+          if (sampleRows.length > 0) {
+            schemaStatements.push(
+              [
+                `-- SAMPLE_ROWS ${table.TABLE_NAME} (up to 3 latest rows)`,
+                ...sampleRows.map((row) => `-- ${JSON.stringify(row)}`),
+              ].join("\n")
+            );
+          } else {
+            schemaStatements.push(
+              `-- SAMPLE_ROWS ${table.TABLE_NAME} (no rows found or unable to infer ordering)`
+            );
+          }
+        }
       }
     }
 
@@ -542,6 +560,7 @@ export async function mysqlExportSchema(
           proceduresDir,
           functionsDir,
           viewsDir,
+          includeSampleRows,
           tables: tables.length,
           views: views.length,
           routines: routines.length,
@@ -557,6 +576,45 @@ export async function mysqlExportSchema(
       content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
       isError: true,
     };
+  }
+}
+
+async function getTableSampleRows(database: string, table: string): Promise<any[]> {
+  try {
+    const orderingColumns = await executeQuery<any[]>(
+      `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_KEY, EXTRA, ORDINAL_POSITION
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = ?
+         AND TABLE_NAME = ?
+       ORDER BY ORDINAL_POSITION`,
+      [database, table]
+    );
+
+    const primaryKeyColumn = orderingColumns.find(
+      (column) => column.COLUMN_KEY === "PRI"
+    )?.COLUMN_NAME;
+
+    const timestampColumn = orderingColumns.find((column) =>
+      ["timestamp", "datetime", "date"].includes(
+        String(column.DATA_TYPE).toLowerCase()
+      )
+    )?.COLUMN_NAME;
+
+    const autoIncrementColumn = orderingColumns.find((column) =>
+      String(column.EXTRA).toLowerCase().includes("auto_increment")
+    )?.COLUMN_NAME;
+
+    const orderByColumn =
+      autoIncrementColumn || primaryKeyColumn || timestampColumn;
+
+    const sampleSql = orderByColumn
+      ? `SELECT * FROM \`${database}\`.\`${table}\` ORDER BY \`${orderByColumn}\` DESC LIMIT 3`
+      : `SELECT * FROM \`${database}\`.\`${table}\` LIMIT 3`;
+
+    return await executeQuery<any[]>(sampleSql);
+  } catch (error) {
+    log("error", `Error getting sample rows for ${database}.${table}:`, error);
+    return [];
   }
 }
 
