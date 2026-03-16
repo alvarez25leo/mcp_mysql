@@ -310,6 +310,217 @@ export async function mysqlBackup(
 }
 
 // ============================================================================
+// TOOL: mysql_export_schema - Export full database schema to SQL file
+// ============================================================================
+
+export async function mysqlExportSchema(
+  database?: string,
+  outputPath?: string,
+  includeDatabaseStatement: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: database is required when MYSQL_DB is not configured",
+        }],
+        isError: true,
+      };
+    }
+
+    const configuredOutputPath = process.env.MYSQL_SCHEMA_EXPORT_PATH;
+    const finalOutputPath = outputPath || configuredOutputPath;
+    if (!finalOutputPath) {
+      return {
+        content: [{
+          type: "text",
+          text: "Error: outputPath is required or set MYSQL_SCHEMA_EXPORT_PATH",
+        }],
+        isError: true,
+      };
+    }
+
+    const resolvedOutputPath = path.resolve(finalOutputPath);
+    const statements: string[] = [];
+
+    if (includeDatabaseStatement) {
+      const createDatabaseResult = await executeQuery<any[]>(
+        `SHOW CREATE DATABASE \`${targetDatabase}\``
+      );
+      const createDatabaseStatement =
+        createDatabaseResult[0]?.["Create Database"] ||
+        createDatabaseResult[0]?.["CREATE DATABASE"];
+
+      if (createDatabaseStatement) {
+        statements.push(`${createDatabaseStatement};`);
+      }
+
+      statements.push(`USE \`${targetDatabase}\`;`);
+    }
+
+    const tables = await executeQuery<any[]>(
+      `SELECT TABLE_NAME
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = ?
+         AND TABLE_TYPE = 'BASE TABLE'
+       ORDER BY TABLE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const table of tables) {
+      const createTableResult = await executeQuery<any[]>(
+        `SHOW CREATE TABLE \`${targetDatabase}\`.\`${table.TABLE_NAME}\``
+      );
+      const createTableStatement =
+        createTableResult[0]?.["Create Table"] ||
+        createTableResult[0]?.["CREATE TABLE"];
+
+      if (createTableStatement) {
+        statements.push(`DROP TABLE IF EXISTS \`${table.TABLE_NAME}\`;`);
+        statements.push(`${createTableStatement};`);
+      }
+    }
+
+    const views = await executeQuery<any[]>(
+      `SELECT TABLE_NAME
+       FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = ?
+       ORDER BY TABLE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const view of views) {
+      const createViewResult = await executeQuery<any[]>(
+        `SHOW CREATE VIEW \`${targetDatabase}\`.\`${view.TABLE_NAME}\``
+      );
+      const createViewStatement =
+        createViewResult[0]?.["Create View"] ||
+        createViewResult[0]?.["CREATE VIEW"];
+
+      if (createViewStatement) {
+        statements.push(`DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`);
+        statements.push(`${createViewStatement};`);
+      }
+    }
+
+    const routines = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME, ROUTINE_TYPE
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+       ORDER BY ROUTINE_TYPE, ROUTINE_NAME`,
+      [targetDatabase]
+    );
+
+    for (const routine of routines) {
+      if (routine.ROUTINE_TYPE === "PROCEDURE") {
+        const createProcedureResult = await executeQuery<any[]>(
+          `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``
+        );
+        const createProcedureStatement =
+          createProcedureResult[0]?.["Create Procedure"];
+
+        if (createProcedureStatement) {
+          statements.push(`DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\`;`);
+          statements.push("DELIMITER ;;");
+          statements.push(`${createProcedureStatement};;`);
+          statements.push("DELIMITER ;");
+        }
+      } else if (routine.ROUTINE_TYPE === "FUNCTION") {
+        const createFunctionResult = await executeQuery<any[]>(
+          `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``
+        );
+        const createFunctionStatement =
+          createFunctionResult[0]?.["Create Function"];
+
+        if (createFunctionStatement) {
+          statements.push(`DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\`;`);
+          statements.push("DELIMITER ;;");
+          statements.push(`${createFunctionStatement};;`);
+          statements.push("DELIMITER ;");
+        }
+      }
+    }
+
+    const triggers = await executeQuery<any[]>(
+      `SELECT TRIGGER_NAME
+       FROM information_schema.TRIGGERS
+       WHERE TRIGGER_SCHEMA = ?
+       ORDER BY TRIGGER_NAME`,
+      [targetDatabase]
+    );
+
+    for (const trigger of triggers) {
+      const createTriggerResult = await executeQuery<any[]>(
+        `SHOW CREATE TRIGGER \`${targetDatabase}\`.\`${trigger.TRIGGER_NAME}\``
+      );
+      const createTriggerStatement =
+        createTriggerResult[0]?.["SQL Original Statement"] ||
+        createTriggerResult[0]?.["Create Trigger"];
+
+      if (createTriggerStatement) {
+        statements.push(`DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\`;`);
+        statements.push("DELIMITER ;;");
+        statements.push(`${createTriggerStatement};;`);
+        statements.push("DELIMITER ;");
+      }
+    }
+
+    const events = await executeQuery<any[]>(
+      `SELECT EVENT_NAME
+       FROM information_schema.EVENTS
+       WHERE EVENT_SCHEMA = ?
+       ORDER BY EVENT_NAME`,
+      [targetDatabase]
+    );
+
+    for (const event of events) {
+      const createEventResult = await executeQuery<any[]>(
+        `SHOW CREATE EVENT \`${targetDatabase}\`.\`${event.EVENT_NAME}\``
+      );
+      const createEventStatement =
+        createEventResult[0]?.["Create Event"];
+
+      if (createEventStatement) {
+        statements.push(`DROP EVENT IF EXISTS \`${event.EVENT_NAME}\`;`);
+        statements.push("DELIMITER ;;");
+        statements.push(`${createEventStatement};;`);
+        statements.push("DELIMITER ;");
+      }
+    }
+
+    fs.mkdirSync(path.dirname(resolvedOutputPath), { recursive: true });
+    fs.writeFileSync(resolvedOutputPath, statements.join("\n\n") + "\n", "utf8");
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          outputPath: resolvedOutputPath,
+          tables: tables.length,
+          views: views.length,
+          routines: routines.length,
+          triggers: triggers.length,
+          events: events.length,
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_export_schema:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================================
 // TOOL: mysql_import - Import data from JSON
 // ============================================================================
 
@@ -1530,6 +1741,18 @@ export const additionalToolDefinitions = [
     },
   },
   {
+    name: "mysql_export_schema",
+    description: "Export the full schema of a MySQL database to a .sql file on disk. Generates CREATE DATABASE, USE, CREATE TABLE, CREATE VIEW, CREATE PROCEDURE, CREATE FUNCTION, CREATE TRIGGER, and CREATE EVENT statements for the selected database. The file path can be provided directly or taken from MYSQL_SCHEMA_EXPORT_PATH.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: { type: "string", description: "Database name to export. Optional if MYSQL_DB is configured." },
+        outputPath: { type: "string", description: "Absolute or relative path where the .sql file will be written. Optional if MYSQL_SCHEMA_EXPORT_PATH is configured." },
+        includeDatabaseStatement: { type: "boolean", description: "If true, includes CREATE DATABASE and USE statements at the top of the file. Default: true." },
+      },
+    },
+  },
+  {
     name: "mysql_import",
     description: "Import data from a JSON array into a table. Use this tool to bulk insert data, restore backups, or sync data. Supports three modes: 'insert' (adds new rows), 'replace' (replaces existing rows with same primary key), and 'upsert' (inserts new or updates existing based on primary key). All operations run in a transaction for data integrity.",
     inputSchema: {
@@ -1769,6 +1992,9 @@ export async function handleAdditionalTool(
     
     case "mysql_backup":
       return mysqlBackup(args.table, args.format, args.database, args.whereClause, args.limit);
+
+    case "mysql_export_schema":
+      return mysqlExportSchema(args.database, args.outputPath, args.includeDatabaseStatement);
     
     case "mysql_import":
       return mysqlImport(args.table, args.data, args.database, args.mode);
