@@ -46,6 +46,7 @@
     "express": "^5.2.1",
     "mysql2": "^3.16.0",
     "node-sql-parser": "^5.4.0",
+    "openai": "^6.6.0",
     "zod": "^4.3.5"
   },
   "devDependencies": {

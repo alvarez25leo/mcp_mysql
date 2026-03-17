@@ -49,6 +49,10 @@ Variables útiles para documentación:
 MYSQL_AI_DOCS_DIR=/Users/leonardo/Documents/tornado/docs
 MYSQL_SCHEMA_EXPORT_DIR=/Users/leonardo/Documents/tornado/db-schema
 MYSQL_SCHEMA_EXPORT_INCLUDE_SAMPLE_ROWS=true
+MYSQL_AI_DOCS_ENABLED=true
+MYSQL_AI_DOCS_OPENAI_API_KEY=sk-...
+MYSQL_AI_DOCS_OPENAI_MODEL=gpt-5
+MYSQL_AI_DOCS_TEMPLATE_PATH=/Users/leonardo/Documents/mcp/mysql/src/template/_template_example_sp.md
 ```
 
 Variables de permisos:
@@ -93,7 +97,7 @@ Uso típico:
 ### Exportación y documentación
 
 - `mysql_export_schema`: exporta el esquema a carpeta con `schema.sql`,
-  `procedures/`, `functions/` y `views/`.
+  `procedures/`, `functions/`, `views/`, `triggers/` y `events/`.
 - `mysql_document_procedure`: genera un `.md` profesional en español
   para un stored procedure.
 - `mysql_document_function`: genera un `.md` profesional en español
@@ -155,6 +159,7 @@ Genera `docs/procedures/NOMBRE.md` en español con:
 - filas de ejemplo
 - análisis paso a paso del SQL
 - SQL fuente opcional
+- y, si `documentWithAi=true`, lo reescribe con OpenAI usando el template configurado por env
 
 Ejemplo:
 
@@ -163,9 +168,17 @@ Ejemplo:
   "procedureName": "SP_LOGIN",
   "database": "tornadoexampleDB",
   "outputDir": "/Users/leonardo/Documents/tornado/docs",
-  "includeSourceSql": true
+  "includeSourceSql": true,
+  "documentWithAi": true
 }
 ```
+
+Variables usadas cuando `documentWithAi=true`:
+
+- `MYSQL_AI_DOCS_ENABLED`: si está en `true`, fuerza el uso de OpenAI aunque no envíes `documentWithAi` en el tool
+- `MYSQL_AI_DOCS_OPENAI_API_KEY` o `OPENAI_API_KEY`: token de OpenAI
+- `MYSQL_AI_DOCS_OPENAI_MODEL`: modelo a usar
+- `MYSQL_AI_DOCS_TEMPLATE_PATH`: template Markdown base. Si no se define, usa `src/template/_template_example_sp.md`
 
 ### `mysql_document_function`
 

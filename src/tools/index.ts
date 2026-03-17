@@ -7,6 +7,8 @@ import { executeQuery, executeReadOnlyQuery, getPool } from "../db/index.js";
 import { log } from "../utils/index.js";
 import * as fs from "fs";
 import * as path from "path";
+import OpenAI from "openai";
+import { fileURLToPath } from "url";
 
 // Query history storage (in-memory for session)
 const queryHistory: Array<{
@@ -21,6 +23,15 @@ const queryHistory: Array<{
 
 let queryIdCounter = 0;
 const ROUTINE_DELIMITER = "$$";
+const templateCache = new Map<string, string>();
+const currentModuleDir = path.dirname(fileURLToPath(import.meta.url));
+let openAiClientCache:
+  | {
+      apiKey: string;
+      baseURL?: string;
+      client: OpenAI;
+    }
+  | undefined;
 
 /**
  * Add a query to the history
@@ -76,6 +87,143 @@ function buildDelimitedSqlBlock(statements: string[], delimiter: string = ROUTIN
     "DELIMITER ;",
     "",
   ].join("\n\n");
+}
+
+function getAiDocsApiKey(): string | undefined {
+  return (
+    process.env.MYSQL_AI_DOCS_OPENAI_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENAI_API_TOKEN
+  );
+}
+
+function isAiDocsEnvEnabled(): boolean {
+  return String(process.env.MYSQL_AI_DOCS_ENABLED || "").toLowerCase() === "true";
+}
+
+function shouldDocumentWithAi(requestedValue: boolean = false): boolean {
+  return requestedValue || isAiDocsEnvEnabled();
+}
+
+function getAiDocsModel(): string {
+  return process.env.MYSQL_AI_DOCS_OPENAI_MODEL || "gpt-5";
+}
+
+function getAiDocsTemplatePath(): string {
+  const configuredPath = process.env.MYSQL_AI_DOCS_TEMPLATE_PATH;
+  if (configuredPath) {
+    return path.resolve(configuredPath);
+  }
+
+  const candidatePaths = [
+    path.resolve(process.cwd(), "src", "template", "_template_example_sp.md"),
+    path.resolve(currentModuleDir, "../template/_template_example_sp.md"),
+    path.resolve(currentModuleDir, "../../../src/template/_template_example_sp.md"),
+  ];
+
+  const existingPath = candidatePaths.find((candidatePath) => fs.existsSync(candidatePath));
+  if (existingPath) {
+    return existingPath;
+  }
+
+  return candidatePaths[candidatePaths.length - 1];
+}
+
+function getAiDocsTemplate(): string {
+  const templatePath = getAiDocsTemplatePath();
+
+  if (!templateCache.has(templatePath)) {
+    templateCache.set(templatePath, fs.readFileSync(templatePath, "utf8"));
+  }
+
+  return templateCache.get(templatePath)!;
+}
+
+function getOpenAiClient(): OpenAI {
+  const apiKey = getAiDocsApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "OpenAI API key is required when documentWithAi=true. Configure MYSQL_AI_DOCS_OPENAI_API_KEY, OPENAI_API_KEY, or OPENAI_API_TOKEN."
+    );
+  }
+
+  const baseURL = process.env.MYSQL_AI_DOCS_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
+
+  if (
+    !openAiClientCache ||
+    openAiClientCache.apiKey !== apiKey ||
+    openAiClientCache.baseURL !== baseURL
+  ) {
+    openAiClientCache = {
+      apiKey,
+      baseURL,
+      client: new OpenAI({
+        apiKey,
+        baseURL,
+      }),
+    };
+  }
+
+  return openAiClientCache.client;
+}
+
+function stripMarkdownCodeFence(markdown: string): string {
+  const trimmed = markdown.trim();
+  const fencedMatch = trimmed.match(/^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i);
+  return fencedMatch?.[1]?.trim() || trimmed;
+}
+
+async function renderDocumentationWithOpenAi(args: {
+  objectType: "procedure" | "function" | "view";
+  objectName: string;
+  fallbackMarkdown: string;
+  context: unknown;
+}): Promise<{ markdown: string; model: string; templatePath: string }> {
+  const templatePath = getAiDocsTemplatePath();
+  const template = getAiDocsTemplate();
+  const model = getAiDocsModel();
+  const client = getOpenAiClient();
+
+  const prompt = [
+    "Eres un arquitecto senior de bases de datos y documentador técnico.",
+    "Tu tarea es generar un documento Markdown final y profesional en español.",
+    "Debes tomar el TEMPLATE como patrón principal y producir una documentación muy similar en estructura, profundidad, tono y nivel de detalle.",
+    "Imita el estilo del ejemplo, adaptándolo fielmente al procedimiento, función o vista real que estás documentando.",
+    "No inventes tablas, funciones, parámetros ni comportamiento no presentes en el contexto.",
+    "Si un dato no está claro, escribe 'No identificado' o explica la limitación brevemente.",
+    "Devuelve únicamente Markdown final, sin explicación adicional ni fences.",
+    "",
+    "[TIPO_OBJETO]",
+    args.objectType,
+    "",
+    "[NOMBRE_OBJETO]",
+    args.objectName,
+    "",
+    "[TEMPLATE_REFERENCIA]",
+    template,
+    "",
+    "[BORRADOR_BASE]",
+    args.fallbackMarkdown,
+    "",
+    "[CONTEXTO_ESTRUCTURADO]",
+    JSON.stringify(args.context, null, 2),
+  ].join("\n");
+
+  const response = await client.responses.create({
+    model,
+    input: prompt,
+  });
+
+  const output = stripMarkdownCodeFence(response.output_text || "");
+  if (!output) {
+    throw new Error("OpenAI returned an empty Markdown document.");
+  }
+
+  return {
+    markdown: output,
+    model,
+    templatePath,
+  };
 }
 
 // ============================================================================
@@ -1293,7 +1441,8 @@ export async function mysqlDocumentProcedure(
   procedureName: string,
   database?: string,
   outputDir?: string,
-  includeSourceSql: boolean = true
+  includeSourceSql: boolean = true,
+  documentWithAi: boolean = false
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1370,7 +1519,7 @@ export async function mysqlDocumentProcedure(
 
     const tableDetails = await hydrateReferencedTables(referencedTables);
 
-    const markdown = renderProcedureDocumentationMarkdown({
+    const baseMarkdown = renderProcedureDocumentationMarkdown({
       database: targetDatabase,
       procedureName,
       metadata,
@@ -1382,6 +1531,35 @@ export async function mysqlDocumentProcedure(
       createSql,
       includeSourceSql,
     });
+    let markdown = baseMarkdown;
+    let aiMetadata: { model: string; templatePath: string } | undefined;
+
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+
+    if (shouldUseAi) {
+      const aiResult = await renderDocumentationWithOpenAi({
+        objectType: "procedure",
+        objectName: procedureName,
+        fallbackMarkdown: baseMarkdown,
+        context: {
+          database: targetDatabase,
+          procedureName,
+          metadata,
+          purpose,
+          parameters: paramsResult,
+          referencedTables: tableDetails,
+          referencedFunctions,
+          workflowSteps,
+          includeSourceSql,
+          createSql,
+        },
+      });
+      markdown = aiResult.markdown;
+      aiMetadata = {
+        model: aiResult.model,
+        templatePath: aiResult.templatePath,
+      };
+    }
 
     const baseOutputDir = path.resolve(
       outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
@@ -1399,6 +1577,9 @@ export async function mysqlDocumentProcedure(
           database: targetDatabase,
           procedureName,
           outputFile,
+          documentWithAi: shouldUseAi,
+          aiModel: aiMetadata?.model || null,
+          aiTemplatePath: aiMetadata?.templatePath || null,
           referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
           workflowSteps: workflowSteps.length,
         }, null, 2),
@@ -1418,7 +1599,8 @@ export async function mysqlDocumentFunction(
   functionName: string,
   database?: string,
   outputDir?: string,
-  includeSourceSql: boolean = true
+  includeSourceSql: boolean = true,
+  documentWithAi: boolean = false
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1484,7 +1666,7 @@ export async function mysqlDocumentFunction(
     const purpose = inferFunctionPurpose(functionName, createSql, referencedTables);
     const tableDetails = await hydrateReferencedTables(referencedTables);
 
-    const markdown = renderFunctionDocumentationMarkdown({
+    const baseMarkdown = renderFunctionDocumentationMarkdown({
       database: targetDatabase,
       functionName,
       metadata,
@@ -1495,6 +1677,34 @@ export async function mysqlDocumentFunction(
       createSql,
       includeSourceSql,
     });
+    let markdown = baseMarkdown;
+    let aiMetadata: { model: string; templatePath: string } | undefined;
+
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+
+    if (shouldUseAi) {
+      const aiResult = await renderDocumentationWithOpenAi({
+        objectType: "function",
+        objectName: functionName,
+        fallbackMarkdown: baseMarkdown,
+        context: {
+          database: targetDatabase,
+          functionName,
+          metadata,
+          purpose,
+          parameters: paramsResult.filter((param) => param.name),
+          referencedTables: tableDetails,
+          workflowSteps,
+          includeSourceSql,
+          createSql,
+        },
+      });
+      markdown = aiResult.markdown;
+      aiMetadata = {
+        model: aiResult.model,
+        templatePath: aiResult.templatePath,
+      };
+    }
 
     const baseOutputDir = path.resolve(
       outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
@@ -1512,6 +1722,9 @@ export async function mysqlDocumentFunction(
           database: targetDatabase,
           functionName,
           outputFile,
+          documentWithAi: shouldUseAi,
+          aiModel: aiMetadata?.model || null,
+          aiTemplatePath: aiMetadata?.templatePath || null,
           referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
           workflowSteps: workflowSteps.length,
         }, null, 2),
@@ -1531,7 +1744,8 @@ export async function mysqlDocumentView(
   viewName: string,
   database?: string,
   outputDir?: string,
-  includeSourceSql: boolean = true
+  includeSourceSql: boolean = true,
+  documentWithAi: boolean = false
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1580,7 +1794,7 @@ export async function mysqlDocumentView(
     const purpose = inferViewPurpose(viewName, createSql, referencedTables);
     const tableDetails = await hydrateReferencedTables(referencedTables);
 
-    const markdown = renderViewDocumentationMarkdown({
+    const baseMarkdown = renderViewDocumentationMarkdown({
       database: targetDatabase,
       viewName,
       metadata: viewInfo[0] || {},
@@ -1591,6 +1805,34 @@ export async function mysqlDocumentView(
       createSql,
       includeSourceSql,
     });
+    let markdown = baseMarkdown;
+    let aiMetadata: { model: string; templatePath: string } | undefined;
+
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+
+    if (shouldUseAi) {
+      const aiResult = await renderDocumentationWithOpenAi({
+        objectType: "view",
+        objectName: viewName,
+        fallbackMarkdown: baseMarkdown,
+        context: {
+          database: targetDatabase,
+          viewName,
+          metadata: viewInfo[0] || {},
+          purpose,
+          columns,
+          referencedTables: tableDetails,
+          workflowSteps,
+          includeSourceSql,
+          createSql,
+        },
+      });
+      markdown = aiResult.markdown;
+      aiMetadata = {
+        model: aiResult.model,
+        templatePath: aiResult.templatePath,
+      };
+    }
 
     const baseOutputDir = path.resolve(
       outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
@@ -1608,6 +1850,9 @@ export async function mysqlDocumentView(
           database: targetDatabase,
           viewName,
           outputFile,
+          documentWithAi: shouldUseAi,
+          aiModel: aiMetadata?.model || null,
+          aiTemplatePath: aiMetadata?.templatePath || null,
           referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
           workflowSteps: workflowSteps.length,
         }, null, 2),
@@ -1626,13 +1871,15 @@ export async function mysqlDocumentView(
 export async function mysqlExportProcedureDocs(
   database?: string,
   outputDir?: string,
-  includeSourceSql: boolean = true
+  includeSourceSql: boolean = true,
+  documentWithAi: boolean = false
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1663,7 +1910,8 @@ export async function mysqlExportProcedureDocs(
         procedure.name,
         targetDatabase,
         baseOutputDir,
-        includeSourceSql
+        includeSourceSql,
+        shouldUseAi
       );
 
       if (result.isError) {
@@ -1714,6 +1962,8 @@ export async function mysqlExportProcedureDocs(
           generated,
           errors,
           structureFile,
+          documentWithAi: shouldUseAi,
+          aiModel: shouldUseAi ? getAiDocsModel() : null,
         }, null, 2),
       }],
       isError: false,
@@ -1731,13 +1981,15 @@ export async function mysqlGenerateAiDocs(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  includeDataDictionary: boolean = true
+  includeDataDictionary: boolean = true,
+  documentWithAi: boolean = false
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1793,7 +2045,8 @@ export async function mysqlGenerateAiDocs(
         procedure.name,
         targetDatabase,
         baseOutputDir,
-        includeSourceSql
+        includeSourceSql,
+        shouldUseAi
       );
 
       if (result.isError) {
@@ -1818,7 +2071,8 @@ export async function mysqlGenerateAiDocs(
         fn.name,
         targetDatabase,
         baseOutputDir,
-        includeSourceSql
+        includeSourceSql,
+        shouldUseAi
       );
 
       if (result.isError) {
@@ -1842,7 +2096,8 @@ export async function mysqlGenerateAiDocs(
         view.name,
         targetDatabase,
         baseOutputDir,
-        includeSourceSql
+        includeSourceSql,
+        shouldUseAi
       );
 
       if (result.isError) {
@@ -3415,7 +3670,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_document_procedure",
-    description: "Genera un documento Markdown profesional en espanol para un stored procedure y lo guarda en disco. Incluye proposito inferido, parametros, tablas relacionadas, filas de ejemplo, analisis paso a paso y opcionalmente el SQL fuente. Es util para que una persona o una IA entiendan rapido la logica del procedimiento.",
+    description: "Genera un documento Markdown profesional en espanol para un stored procedure y lo guarda en disco. Incluye proposito inferido, parametros, tablas relacionadas, filas de ejemplo, analisis paso a paso y opcionalmente el SQL fuente. Si documentWithAi=true, enriquece el Markdown final usando OpenAI con api key, modelo y template configurados por variables de entorno.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3423,13 +3678,14 @@ export const additionalToolDefinitions = [
         database: { type: "string", description: "Database where the procedure exists. Optional if MYSQL_DB is configured." },
         outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
         includeSourceSql: { type: "boolean", description: "If true, includes the CREATE PROCEDURE SQL in the generated Markdown. Default: true." },
+        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown using MYSQL_AI_DOCS_OPENAI_API_KEY/OPENAI_API_KEY, MYSQL_AI_DOCS_OPENAI_MODEL, and MYSQL_AI_DOCS_TEMPLATE_PATH. Default: false." },
       },
       required: ["procedureName"],
     },
   },
   {
     name: "mysql_document_function",
-    description: "Genera un documento Markdown profesional en espanol para una function de MySQL y lo guarda en disco. Incluye proposito inferido, parametros, tipo de retorno, tablas consultadas, analisis paso a paso y SQL fuente opcional.",
+    description: "Genera un documento Markdown profesional en espanol para una function de MySQL y lo guarda en disco. Incluye proposito inferido, parametros, tipo de retorno, tablas consultadas, analisis paso a paso y SQL fuente opcional. Si documentWithAi=true, usa OpenAI para pulir el documento final.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3437,13 +3693,14 @@ export const additionalToolDefinitions = [
         database: { type: "string", description: "Database where the function exists. Optional if MYSQL_DB is configured." },
         outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
         includeSourceSql: { type: "boolean", description: "If true, includes the CREATE FUNCTION SQL in the generated Markdown. Default: true." },
+        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false." },
       },
       required: ["functionName"],
     },
   },
   {
     name: "mysql_document_view",
-    description: "Genera un documento Markdown profesional en espanol para una view y lo guarda en disco. Incluye columnas expuestas, tablas fuente, filas de ejemplo, proposito inferido, analisis paso a paso y SQL fuente opcional.",
+    description: "Genera un documento Markdown profesional en espanol para una view y lo guarda en disco. Incluye columnas expuestas, tablas fuente, filas de ejemplo, proposito inferido, analisis paso a paso y SQL fuente opcional. Si documentWithAi=true, usa OpenAI para pulir el documento final.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3451,25 +3708,27 @@ export const additionalToolDefinitions = [
         database: { type: "string", description: "Database where the view exists. Optional if MYSQL_DB is configured." },
         outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
         includeSourceSql: { type: "boolean", description: "If true, includes the CREATE VIEW SQL in the generated Markdown. Default: true." },
+        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false." },
       },
       required: ["viewName"],
     },
   },
   {
     name: "mysql_export_procedure_docs",
-    description: "Exporta la documentacion Markdown de todos los stored procedures de una base de datos. Procesa cada SP uno por uno, termina su archivo antes de pasar al siguiente, reescribe el .md con la version actualizada y deja un README dentro de procedures/ explicando la estructura usada para documentar.",
+    description: "Exporta la documentacion Markdown de todos los stored procedures de una base de datos. Procesa cada SP uno por uno, termina su archivo antes de pasar al siguiente, reescribe el .md con la version actualizada y deja un README dentro de procedures/ explicando la estructura usada para documentar. Si documentWithAi=true, cada archivo se enriquece con OpenAI.",
     inputSchema: {
       type: "object",
       properties: {
         database: { type: "string", description: "Database name to document. Optional if MYSQL_DB is configured." },
         outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
         includeSourceSql: { type: "boolean", description: "If true, includes source SQL in each generated procedure Markdown. Default: true." },
+        documentWithAi: { type: "boolean", description: "If true, uses OpenAI for each stored procedure Markdown file. Default: false." },
       },
     },
   },
   {
     name: "mysql_generate_ai_docs",
-    description: "Genera documentacion completa de una base de datos en forma secuencial. Primero puede crear el data dictionary y luego documenta procedures, functions y views uno por uno, terminando cada archivo detallado antes de pasar al siguiente. Guarda todo en disco y crea un README indice con el resumen.",
+    description: "Genera documentacion completa de una base de datos en forma secuencial. Primero puede crear el data dictionary y luego documenta procedures, functions y views uno por uno, terminando cada archivo detallado antes de pasar al siguiente. Guarda todo en disco y crea un README indice con el resumen. Si documentWithAi=true, usa OpenAI para enriquecer los archivos Markdown generados.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3477,6 +3736,7 @@ export const additionalToolDefinitions = [
         outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
         includeSourceSql: { type: "boolean", description: "If true, includes source SQL in generated Markdown files. Default: true." },
         includeDataDictionary: { type: "boolean", description: "If true, generates data-dictionary.md before documenting routines and views. Default: true." },
+        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to enrich the generated Markdown files. Default: false." },
       },
     },
   },
@@ -3689,7 +3949,8 @@ export async function handleAdditionalTool(
         args.procedureName,
         args.database,
         args.outputDir,
-        args.includeSourceSql
+        args.includeSourceSql,
+        args.documentWithAi
       );
 
     case "mysql_document_function":
@@ -3697,7 +3958,8 @@ export async function handleAdditionalTool(
         args.functionName,
         args.database,
         args.outputDir,
-        args.includeSourceSql
+        args.includeSourceSql,
+        args.documentWithAi
       );
 
     case "mysql_document_view":
@@ -3705,14 +3967,16 @@ export async function handleAdditionalTool(
         args.viewName,
         args.database,
         args.outputDir,
-        args.includeSourceSql
+        args.includeSourceSql,
+        args.documentWithAi
       );
 
     case "mysql_export_procedure_docs":
       return mysqlExportProcedureDocs(
         args.database,
         args.outputDir,
-        args.includeSourceSql
+        args.includeSourceSql,
+        args.documentWithAi
       );
 
     case "mysql_generate_ai_docs":
@@ -3720,7 +3984,8 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql,
-        args.includeDataDictionary
+        args.includeDataDictionary,
+        args.documentWithAi
       );
     
     case "mysql_show_views":

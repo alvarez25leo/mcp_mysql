@@ -1016,3 +1016,534 @@ Para que una IA documente todos los SP del sistema con consistencia, conviene ex
 
 Con eso, este README puede servir como plantilla base para el resto de procedimientos del sistema.
 
+```sql
+DELIMITER $$ 
+
+USE `onroad`$$
+
+DROP PROCEDURE IF EXISTS `SP_GET_PSG_MTRAVEL`$$
+
+CREATE DEFINER=`root`@`%` PROCEDURE `SP_GET_PSG_MTRAVEL`(IN LANGID INT,IN JSONDATA JSON) 
+BEGIN 
+	DECLARE TZORIGIN VARCHAR(30);
+	DECLARE queryString LONGTEXT;
+	DECLARE ORIGINID, DESTINYID, CHANNELID,ORIGINEXTERNALID, DESTINYEXTERNALID, ISPOINT, ISRETURN INT;
+	DECLARE DATEINI, DATEEND,DATETMPFFLAG TIMESTAMP;
+	DECLARE DATAMROUTE JSON;	
+	DECLARE TIMEWAIT INT DEFAULT 0;		
+	DECLARE CURRENCYID,priceId INT;
+	DECLARE MAXTIME INT;
+	DECLARE CURRENCY VARCHAR(200);
+	DECLARE newConversionValue DOUBLE;
+	DECLARE priceEndCityNear,priceInitCityNear,priceTravel,TRAVELPOINT DECIMAL (10,2);
+	DECLARE cityInit,cityInit2,cityInitAb,stateInit,countryInit,addressInit,cityEnd,cityEnd2,cityEndAb,stateEnd,countryEnd,addressEnd,lngInit,latInit,lngEnd,latEnd,endtz VARCHAR(500);
+	DECLARE CPERSON, CPERSONDISABILITY INT;
+	DECLARE FILTERDATE, FILTERDATEEND DATETIME;
+	DECLARE allowSellMexToMex INT DEFAULT FN_GET_OPTIONSBYKEY('ticket.allowSellMexToMex');
+	DECLARE allowSellMexToMexCityNear INT DEFAULT FN_GET_OPTIONSBYKEY('ticket.allowSellMexToMexCityNear');
+	DECLARE travelTimeTolerance INT DEFAULT FN_GET_OPTIONSBYKEY('ticket.general.travelTimeTolerance');
+	DECLARE COUNTRY_CITYORIGIN, COUNTRY_CITYDESTINY, COUNTRY_CITYDESTINYNEAR INT;
+	DECLARE HOURFORMAT VARCHAR(20) DEFAULT IFNULL((SELECT 
+			LIDET_DESCRIPSHORT
+			FROM `or_option` o
+			LEFT JOIN `or_optionvaluelist` ol ON o.id_option = ol.id_option
+			LEFT JOIN `or_listdetail` ld ON ol.optval_content = ld.id_listdet
+			WHERE o.id_option = 13 AND ol.status = 1 LIMIT 1),'%h:%i %p');	
+
+	IF STR_TO_DATE(JSON_VALUE(JSONDATA,'$.DATEINI'),'%Y-%m-%d')<'2000-01-01' THEN
+		SET JSONDATA = JSON_REPLACE(JSONDATA,'$.DATEINI','2000-01-01');
+	END IF;
+	IF STR_TO_DATE(JSON_VALUE(JSONDATA,'$.DATEEND'),'%Y-%m-%d')<'2000-01-01' THEN
+		SET JSONDATA = JSON_REPLACE(JSONDATA,'$.DATEEND','2000-01-01');
+	END IF;
+ 
+	SELECT ORIGINIDJSON, DESTINYIDJSON, CHANNELIDJSON, DATEINIJSON, DATEENDJSON, NULLIF(ORIGINEXTERNALIDJSON,0), NULLIF(DESTINYEXTERNALIDJSON,0), IFNULL(NULLIF(CURRENTIDJSON,0),567), ISPOINTJSON,IFNULL(IF(CPERSONJSON=0,1,CPERSONJSON),1),CPERSONDISABILITYJSON,ISRETURNJSON
+	INTO ORIGINID, DESTINYID, CHANNELID, DATEINI, DATEEND, ORIGINEXTERNALID, DESTINYEXTERNALID, CURRENCYID, ISPOINT, CPERSON, CPERSONDISABILITY, ISRETURN
+	FROM JSON_TABLE(JSONDATA,'$'
+	COLUMNS(
+		ORIGINIDJSON INT PATH '$.ORIGINID', 
+		DESTINYIDJSON INT PATH '$.DESTINYID',
+		CHANNELIDJSON INT PATH '$.CHANNELID',
+		DATEINIJSON TIMESTAMP PATH '$.DATEINI',
+		DATEENDJSON TIMESTAMP PATH '$.DATEEND',
+		ORIGINEXTERNALIDJSON INT PATH '$.ORIGINEXTERNALID',
+		DESTINYEXTERNALIDJSON INT PATH '$.DESTINYEXTERNALID',
+		ISPOINTJSON INT PATH '$.ISPOINT',
+		CURRENTIDJSON INT PATH '$.CURRENCYID',
+		CPERSONJSON INT PATH '$.CPERSON',
+		CPERSONDISABILITYJSON INT PATH '$.CPERSONDISABILITY',
+		ISRETURNJSON INT PATH '$.ISRETURN'
+	))dt;
+	
+	SELECT 
+	pri0.ID_PRICE,
+	pri0.PRICE_BASE,
+	IF(ISPOINT,FN_GET_POINTFORRULER(
+	IF(ISRETURN,
+	FN_GET_PRICING(JSON_OBJECT('amount',FN_GET_PRICING(JSON_OBJECT('amount',pri0.PRICE_BASE,'currencyId',CURRENCYID,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal','isReturn',ISRETURN,IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),'currencyId',CURRENCYID,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),
+	FN_GET_PRICING(JSON_OBJECT('amount',pri0.PRICE_BASE,'currencyId',CURRENCYID,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID)))
+	),CURRENCYID,0,NULL,ORIGINID,DESTINYID,0),0) AS pointPrice
+	INTO priceId,priceTravel,TRAVELPOINT
+	FROM or_price pri0
+	WHERE pri0.CITY_INI = ORIGINID
+	AND pri0.CITY_END = DESTINYID
+	AND pri0.ID_CURRENCY = CURRENCYID;
+	
+	SET DATAMROUTE = IF(priceTravel > 0, IFNULL(FN_GET_TIMEMULTIROUTE(ORIGINID,DESTINYID),'[]'), '[]');
+	
+	SELECT
+		st.ZONE, st.ID_COUNTRY
+		INTO TZORIGIN, COUNTRY_CITYORIGIN
+	FROM or_city c
+	JOIN `or_state` st ON st.ID_STATE = c.ID_STATE
+	WHERE c.ID_CITY = ORIGINID;
+	
+	SELECT
+		st.ID_COUNTRY INTO COUNTRY_CITYDESTINY
+	FROM or_city c
+	JOIN `or_state` st ON st.ID_STATE = c.ID_STATE
+	WHERE c.ID_CITY = DESTINYID;
+	
+	IF DESTINYEXTERNALID IS NOT NULL THEN	
+		SELECT
+			st.ID_COUNTRY INTO COUNTRY_CITYDESTINYNEAR
+		FROM or_city c
+		JOIN `or_state` st ON st.ID_STATE = c.ID_STATE
+		WHERE c.ID_CITY = DESTINYEXTERNALID;	
+	END IF;
+	
+	IF COUNTRY_CITYORIGIN = 142 AND COUNTRY_CITYDESTINY = 142 THEN
+		SET DATAMROUTE = IF(allowSellMexToMex, DATAMROUTE, '[]');
+	END IF;
+	
+	IF COUNTRY_CITYORIGIN = 142 AND COUNTRY_CITYDESTINYNEAR = 142 THEN
+		SET DATAMROUTE = IF(allowSellMexToMexCityNear, DATAMROUTE, '[]');
+	END IF;
+	
+	IF DATAMROUTE <> '[]' THEN
+		SET FILTERDATE = CONVERT_TZ(CURRENT_TIMESTAMP(),'+00:00',IFNULL(TZORIGIN,'+00:00'));		
+		SET DATEINI = IF(TIME(DATEINI) = '00:00:00' OR DATE(DATEINI) > DATE(CURRENT_TIMESTAMP()), CONCAT(DATE(DATEINI), ' 00:00:00'), CONVERT_TZ(DATEINI ,'+00:00',IFNULL(TZORIGIN,'+00:00')));		
+		SET DATEEND = CONVERT_TZ(DATEEND ,'+00:00',IFNULL(TZORIGIN,'+00:00'));
+
+		IF TIMESTAMPDIFF(DAY,DATEINI,DATEEND)=0 THEN
+			SET DATEEND = DATE_ADD(DATEINI,INTERVAL 1 DAY) ;
+		END IF;	
+
+		IF CHANNELID IN (647,650) AND DATE(DATEINI) = DATE(FILTERDATE) THEN
+			SET travelTimeTolerance = IFNULL(travelTimeTolerance * -1, 0);
+			SET FILTERDATE = DATE_ADD(FILTERDATE,INTERVAL travelTimeTolerance SECOND);
+			SET DATEINI = DATE_ADD(DATEINI,INTERVAL travelTimeTolerance SECOND);
+		END IF;		
+
+		SELECT lstattr0.`LISATTR_VALUE` INTO newConversionValue
+		FROM or_listdetail ol
+		LEFT JOIN or_listattrval lstattr0 ON ol.ID_LISTDET = lstattr0.ID_ITEM AND lstattr0.ID_ATTR = 572
+		WHERE ol.ID_LIST=54 AND ol.`STATUS` = 1 AND ol.ID_LISTDET = CURRENCYID;
+
+		SELECT ctex_amountsell * newConversionValue INTO priceInitCityNear
+		FROM `or_city_external`
+		WHERE `id_citybase` = ORIGINID
+		AND id_city = ORIGINEXTERNALID
+		AND `type` = 1035;
+
+		SELECT ctex_amountsell * newConversionValue INTO priceEndCityNear
+		FROM `or_city_external`
+		WHERE `id_citybase` = DESTINYID
+		AND id_city = DESTINYEXTERNALID
+		AND `type` = 1036; 
+
+		SELECT LIDET_DESCRIPSHORT INTO CURRENCY FROM or_listdetail ol WHERE ID_LISTDET = CURRENCYID;	
+
+		SELECT CONCAT(cty0.CITY_NAME ,', ',stat0.ST_ABBREVIATION,' - ',cty0.CITY_ALIAS),CONCAT(cty0.CITY_NAME ,', ',stat0.ST_ABBREVIATION,' (',cty0.CITY_ALIAS,')'),
+			cty0.CITY_ABBREVIATION,stat0.ST_NAME,cont0.CONTR_NAME,IFNULL(off0.OFFI_LOCADDRESS,cty0.CITY_ADDRESS),cty0.CITY_LONGITUD,cty0.CITY_LATITUD
+		INTO cityInit2,cityInit,cityInitAb,stateInit,countryInit,addressInit,lngInit,latInit
+		FROM or_city cty0
+		INNER JOIN or_state stat0 ON stat0.ID_STATE = cty0.ID_STATE
+		INNER JOIN or_country cont0 ON cont0.ID_COUNTRY = stat0.ID_COUNTRY
+		LEFT JOIN or_office off0 ON off0.ID_CITY = cty0.ID_CITY
+		WHERE cty0.ID_CITY = ORIGINID
+		LIMIT 1;
+
+		SELECT CONCAT(cty0.CITY_NAME ,', ',stat0.ST_ABBREVIATION,' - ',cty0.CITY_ALIAS),CONCAT(cty0.CITY_NAME ,', ',stat0.ST_ABBREVIATION,' (',cty0.CITY_ALIAS,')'),
+			cty0.CITY_ABBREVIATION,stat0.ST_NAME,cont0.CONTR_NAME,IFNULL(off0.OFFI_LOCADDRESS,cty0.CITY_ADDRESS),cty0.CITY_LONGITUD,cty0.CITY_LATITUD, stat0.ZONE
+		INTO cityEnd2,cityEnd,cityEndAb,stateEnd,countryEnd,addressEnd,lngEnd,latEnd,endtz
+		FROM or_city cty0
+		INNER JOIN or_state stat0 ON stat0.ID_STATE = cty0.ID_STATE
+		INNER JOIN or_country cont0 ON cont0.ID_COUNTRY = stat0.ID_COUNTRY
+		LEFT JOIN or_office off0 ON off0.ID_CITY = cty0.ID_CITY
+		WHERE cty0.ID_CITY = DESTINYID
+		LIMIT 1;
+	
+	END IF;
+	
+	DROP TEMPORARY TABLE IF EXISTS `M_ROUTE`;
+	CREATE TEMPORARY TABLE `M_ROUTE`(	
+	id INT, total INT, connTime INT, routes JSON,
+	r0 INT, r1 INT, r2 INT, r3 INT, r4 INT,
+	citiesInit0 INT, citiesInit1 INT, citiesInit2 INT, citiesInit3 INT, citiesInit4 INT,
+	citiesEnd0 INT, citiesEnd1 INT, citiesEnd2 INT, citiesEnd3 INT, citiesEnd4 INT,
+	timeMultiroute INT,
+ 	KEY `idx_tmp0` (id)
+	) ENGINE=INNODB CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+	INSERT M_ROUTE (
+		id,total,connTime,routes,
+		r0,r1,r2,r3,r4,
+		citiesInit0,citiesInit1,citiesInit2,citiesInit3,citiesInit4,
+		citiesEnd0,citiesEnd1,citiesEnd2,citiesEnd3,citiesEnd4,
+		timeMultiroute
+		)
+	SELECT 	
+		id, total, connTime, routes,
+		JSON_VALUE(routes,'$[0]') r0, JSON_VALUE(routes,'$[1]') r1, JSON_VALUE(routes,'$[2]') r2, JSON_VALUE(routes,'$[3]') r3, JSON_VALUE(routes,'$[4]') r4,
+		JSON_VALUE(citiesInit,'$[0]') citiesInit0, JSON_VALUE(citiesInit,'$[1]') citiesInit1, JSON_VALUE(citiesInit,'$[2]') citiesInit2, JSON_VALUE(citiesInit,'$[3]') citiesInit3, JSON_VALUE(citiesInit,'$[4]') citiesInit4,	
+		JSON_VALUE(citiesEnd,'$[0]') citiesEnd0, JSON_VALUE(citiesEnd,'$[1]') citiesEnd1, JSON_VALUE(citiesEnd,'$[2]') citiesEnd2, JSON_VALUE(citiesEnd,'$[3]') citiesEnd3, JSON_VALUE(citiesEnd,'$[4]') citiesEnd4,
+		timeMultiroute
+	FROM JSON_TABLE(DATAMROUTE, '$[*]' 
+	COLUMNS(
+		id INT PATH "$.id",
+		citiesInit JSON PATH "$.citiesInit",
+		citiesEnd JSON PATH "$.citiesEnd",
+		total INT PATH "$.total",
+		connTime INT PATH "$.connTime",
+		routes JSON PATH "$.routes",
+		timeMultiroute INT PATH '$.timeMultiroute'
+	))mr0;
+	
+	SET MAXTIME = (SELECT MAX(timeMultiroute) + MAX(connTime * total) FROM M_ROUTE);	
+	
+	SET FILTERDATEEND = DATE_ADD(DATEINI, INTERVAL IF(MAXTIME > 0, MAXTIME + 86400, 864000) SECOND);
+
+	SET @@lc_time_names = CASE LANGID WHEN 196 THEN 'es_MX' WHEN 197 THEN 'en_US' ELSE 'es_MX' END;
+
+	DROP TEMPORARY TABLE IF EXISTS `TMP_ITINERARY`;
+	CREATE TEMPORARY TABLE `TMP_ITINERARY`(
+	ID_MULTI INT,
+	TOTAL INT,
+	ID_ITINERARY INT,
+	CITY_INI INT,
+	CITY_END INT,
+	ID_ROUTE INT,
+	ITIN_ALIAS VARCHAR(200),
+	LEVELBUS INT,
+	TRAVELSEAT JSON,
+	TRAVELDATE DATETIME,
+	TRAVELENDDATE DATETIME,
+	TRAVELENDDATEWAIT DATETIME,
+	TRAVELENDDATECONEX DATETIME,
+	DATA_ITINERARY JSON,
+	ZONEINI VARCHAR(30),
+	ZONEEND VARCHAR(30),	
+	KEY `idx_tmpItVal_composite` (ID_MULTI, TOTAL, ID_ROUTE, CITY_INI, CITY_END, TRAVELDATE)
+	) ENGINE=INNODB CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci; 
+
+	SELECT	
+	GROUP_CONCAT(
+	"('",
+	CONCAT_WS("','",		
+		f.id,
+		f.total,
+		it.ID_ITINERARY,
+		idCityIni,
+		idCityEnd,
+		it.ID_ROUTE,
+		it.ITIN_ALIAS,
+		lvl.LIDET_NAME,
+		FN_GET_SEATTRAVEL(it.ID_ITINERARY,f.idCityIni,f.idCityEnd,3,NULL),
+		DATE_ADD(it.ITIN_INIDATE, INTERVAL timeDeparture + IFNULL(timePosponeIni, 0) SECOND),
+		DATE_ADD(it.ITIN_INIDATE, INTERVAL timeArrival + IFNULL(timePosponeEnd, 0) SECOND),
+		DATE_ADD(it.ITIN_INIDATE, INTERVAL timeArrival + IFNULL(timePosponeEnd, 0) + TIMEWAIT SECOND),
+		DATE_ADD(it.ITIN_INIDATE, INTERVAL timeArrival + IFNULL(timePosponeEnd, 0) + connTime SECOND),
+		REPLACE(IF(it.ITIN_HAS_NEWCOMPANY = 1 AND it.ITIN_ID_NEWCOMPANY IS NOT NULL  ,JSON_REPLACE(travelName,'$.companyLogo',ocom.COMP_PHOTO,'$.companyName' ,ocom.COMP_NAME),travelName ),"'",""),
+		zoneInit,
+		zoneEnd
+		),
+	"')"
+	) INTO queryString
+	FROM or_itinerary it 
+	JOIN or_itinerarymodule itmd ON itmd.ID_ITINERARY = it.ID_ITINERARY AND itmd.ID_MODULE = CHANNELID AND itmd.STATUS = 1 AND it.status = 1
+	LEFT JOIN or_bus bus ON it.ID_BUS = bus.ID_BUS
+	LEFT JOIN or_bustype bty ON bus.ID_BUSTYPE  = bty.ID_BUSTYPE
+	LEFT JOIN or_listdetail lvl ON lvl.id_list = 34 AND lvl.ID_LISTDET = bty.ID_NIVEL
+	LEFT JOIN `or_company` ocom ON it.ITIN_ID_NEWCOMPANY = ocom.ID_COMP
+	LEFT JOIN JSON_TABLE(DATAMROUTE, '$[*]' 
+	COLUMNS(
+		id INT PATH '$.id',
+		total INT PATH '$.total',
+		connTime INT PATH '$.connTime',
+		NESTED PATH '$.cityRoute[*]' 
+		    COLUMNS(
+			_rowID INT PATH '$._rowID',
+			idRoute INT PATH '$.idRoute',
+			idCityIni INT PATH '$.departure',
+			idCityEnd INT PATH '$.arrival',
+			timeDeparture INT PATH '$.timeDeparture',
+			timeArrival INT PATH '$.timeArrival',
+			stpTypeInit INT PATH '$.stpTypeInit',
+			stpTypeEnd INT PATH '$.stpTypeEnd',
+			travelName JSON PATH '$.travelName',
+			zoneInit VARCHAR(20) PATH '$.zoneInit',
+			zoneEnd VARCHAR(20) PATH '$.zoneEnd'
+		    )
+	))f ON it.`ID_ROUTE` = f.idRoute
+	LEFT JOIN (		
+		SELECT
+			id,
+			it.id_itinerary,
+			IFNULL(SUM(IF(iniRouteStp < ROUTSTP_ORDER, 0, ITP_POSTPONETIME)), 0) timePosponeIni,
+			IFNULL(SUM(IF(endRouteStp < ROUTSTP_ORDER, 0, ITP_POSTPONETIME)), 0) timePosponeEnd
+		FROM or_itinerary it
+		JOIN or_itinerarypostpone itp ON itp.ID_ITINERARY = it.ID_ITINERARY AND itp.status = 1
+		JOIN or_routestop rs ON itp.ID_ROUTESTOP = rs.ID_ROUTESTOP AND rs.status = 1
+		JOIN JSON_TABLE(DATAMROUTE, '$[*]' 
+		COLUMNS(
+			id INT PATH '$.id',
+			NESTED PATH '$.cityRoute[*]' 
+			    COLUMNS(				
+				idRoute INT PATH '$.idRoute',
+				timeDeparture INT PATH '$.timeDeparture',
+				iniRouteStp INT PATH '$.iniRouteStp',
+				endRouteStp INT PATH '$.endRouteStp'
+			    )
+		))f ON it.`ID_ROUTE` = f.idRoute
+		WHERE it.ITIN_INIDATE BETWEEN DATE_SUB(DATE_SUB(DATEINI, INTERVAL 1 DAY), INTERVAL timeDeparture SECOND) AND DATE_SUB(FILTERDATEEND, INTERVAL timeDeparture SECOND)
+		#WHERE DATE_ADD(it.ITIN_INIDATE, INTERVAL timeDeparture SECOND) BETWEEN DATE_SUB(DATEINI, INTERVAL 1 DAY) AND FILTERDATEEND
+		GROUP BY it.id_itinerary, id
+	) itp ON it.id_itinerary = itp.id_itinerary AND f.id = itp.id
+	LEFT JOIN or_itinerarystop isIni ON isIni.ID_ITINERARY = it.ID_ITINERARY AND isIni.ITINSTP_CITYINI = f.idCityIni
+	LEFT JOIN or_itinerarystop isEnd ON isEnd.ID_ITINERARY = it.ID_ITINERARY AND isEnd.ITINSTP_CITYEND = f.idCityEnd
+	WHERE
+	it.ITIN_INIDATE BETWEEN DATE_SUB(DATEINI, INTERVAL timeDeparture SECOND) AND DATE_SUB(FILTERDATEEND, INTERVAL timeDeparture SECOND)
+	#DATE_ADD(it.ITIN_INIDATE, INTERVAL timeDeparture SECOND) BETWEEN DATEINI AND FILTERDATEEND
+	AND it.ITIN_INIDATE > DATE_SUB(FILTERDATE, INTERVAL timeDeparture SECOND)
+	#AND DATE_ADD(it.ITIN_INIDATE, INTERVAL timeDeparture SECOND) > FILTERDATE	
+	AND FN_GET_SEATTRAVEL(it.id_itinerary,f.idCityIni,f.idCityEnd,0,NULL) >= CPERSON
+	AND IF(NULLIF(CPERSONDISABILITY,0) IS NULL, TRUE, FN_GET_TOTALSEATITINERARY(it.ID_ITINERARY,f.idCityEnd,3,NULL) >= CPERSONDISABILITY)
+	AND IF(isIni.ITINSTP_TYPE IS NULL, f.stpTypeInit IN (473,474), isIni.ITINSTP_TYPE IN (473,474))
+	AND IF(isEnd.ITINSTP_TYPE IS NULL, f.stpTypeEnd IN (473,475), isEnd.ITINSTP_TYPE IN (473,475));
+	
+	SET queryString = CONCAT('INSERT TMP_ITINERARY(ID_MULTI, TOTAL, ID_ITINERARY, CITY_INI, CITY_END, ID_ROUTE, ITIN_ALIAS, LEVELBUS, TRAVELSEAT, TRAVELDATE, TRAVELENDDATE, TRAVELENDDATEWAIT, TRAVELENDDATECONEX, DATA_ITINERARY, ZONEINI, ZONEEND) VALUE ', queryString);
+	
+	IF queryString IS NOT NULL THEN
+		PREPARE stmt FROM queryString;
+		EXECUTE stmt;
+	END IF;
+	
+	SELECT
+	mr0.id,
+	rmul0.ROUTMULT_ALIAS multiple,
+	itin0.ID_ITINERARY itinID0,
+	itin1.ID_ITINERARY itinID1,
+	itin2.ID_ITINERARY itinID2,
+	itin3.ID_ITINERARY itinID3,
+	itin4.ID_ITINERARY itinID4,
+	ORIGINID cityInitID,
+	cityInit,
+	cityInitAb,
+	stateInit,
+	countryInit,
+	addressInit,
+	latInit,
+	lngInit,
+	CONCAT_WS(' - ',itin0.ITIN_ALIAS,itin1.ITIN_ALIAS,itin2.ITIN_ALIAS,itin3.ITIN_ALIAS,itin4.ITIN_ALIAS)routesNames,
+	CONCAT_WS(' - ',itin0.ITIN_ALIAS,itin1.ITIN_ALIAS,itin2.ITIN_ALIAS,itin3.ITIN_ALIAS,itin4.ITIN_ALIAS)routesNames2,
+	DESTINYID cityEndID,
+	cityEnd,
+	cityEndAb,
+	stateEnd,
+	countryEnd,
+	addressEnd,
+	latEnd,
+	lngEnd,
+	CONCAT_WS(',',r0,r1,r2,r3,r4) routeIDs,
+	
+ 	CONCAT_WS(',',mr0.citiesInit0,citiesInit1,citiesInit2,citiesInit3,citiesInit4) citiesInit,
+ 	CONCAT_WS(',',mr0.citiesEnd0,citiesEnd1,citiesEnd2,citiesEnd3,citiesEnd4) citiesEnd,
+	
+	JSON_LENGTH(mr0.routes)-1 routesCount,	
+	itin0.TRAVELDATE dateinit,
+	COALESCE(itin4.TRAVELENDDATE, itin3.TRAVELENDDATE, itin2.TRAVELENDDATE, itin1.TRAVELENDDATE) dateEnd,	
+	DATE_FORMAT(CONVERT_TZ(COALESCE(itin4.TRAVELENDDATE, itin3.TRAVELENDDATE, itin2.TRAVELENDDATE, itin1.TRAVELENDDATE),IFNULL(endtz,'+00:00'),'+00:00'),'%Y-%m-%d %h:%i %p') dateEndTz,	
+	IF(ORIGINEXTERNALID IS NULL, NULL,ORIGINEXTERNALID) externalCityInitID,
+	IF(ORIGINEXTERNALID IS NULL, NULL,CONCAT(FN_GET_CITYBYID(ORIGINEXTERNALID),' (',cityInit2,')')) externalCityInit,
+	IF(DESTINYEXTERNALID IS NULL, NULL,DESTINYEXTERNALID) externalCityEndID,
+	IF(DESTINYEXTERNALID IS NULL, NULL,CONCAT(FN_GET_CITYBYID(DESTINYEXTERNALID),' (',cityEnd2,')')) externalCityEnd,
+	IF(ORIGINEXTERNALID IS NULL, NULL, FN_GET_TRAVELNEAR(itin0.TRAVELDATE, itin0.TRAVELDATE, 1035, ORIGINID, ORIGINEXTERNALID, r0)) initCityNear,
+	IF(DESTINYEXTERNALID IS NULL, NULL, FN_GET_TRAVELNEAR(COALESCE(itin4.TRAVELENDDATE, itin3.TRAVELENDDATE, itin2.TRAVELENDDATE, itin1.TRAVELENDDATE), COALESCE(itin4.TRAVELENDDATE, itin3.TRAVELENDDATE, itin2.TRAVELENDDATE, itin1.TRAVELENDDATE),1036,DESTINYID,DESTINYEXTERNALID,COALESCE(r4,r3,r2,r1))) endCityNear,	
+	TRAVELPOINT pointPrice,
+	priceId,
+	priceTravel baseAmount,
+	CURRENCYID currencyID,
+	CURRENCY currency,
+	priceTravel,
+ 	IF(ISRETURN,
+		FN_GET_PRICING(JSON_OBJECT('dateTicket',itin0.TRAVELDATE,'amount',FN_GET_PRICING(JSON_OBJECT('idMRoute',id,'dateTicket',itin0.TRAVELDATE,'amount',priceTravel,'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isReturn',ISRETURN,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),
+		FN_GET_PRICING(JSON_OBJECT('dateTicket',itin0.TRAVELDATE,'amount',priceTravel,'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID)))
+	)
+	+ FN_GET_PRICING(JSON_OBJECT('isCityNear', 1, 'cityNear', ORIGINEXTERNALID, 'cityTypeNear', 1035, 'cityBaseNear', ORIGINID, 'dateTicket',itin0.TRAVELDATE,'amount',IFNULL(priceInitCityNear, 0),'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID)))
+	+ FN_GET_PRICING(JSON_OBJECT('isCityNear', 1, 'cityNear', DESTINYEXTERNALID, 'cityTypeNear', 1036, 'cityBaseNear', DESTINYID,'dateTicket',itin0.TRAVELDATE,'amount',IFNULL(priceEndCityNear, 0),'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',1,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID)))
+	amount,
+ 	JSON_MERGE(IFNULL(FN_GET_PRICING(JSON_OBJECT('dateTicket',itin0.TRAVELDATE,'amount',priceTravel,'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',0,'general',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),JSON_ARRAY()),
+		IFNULL(FN_GET_PRICING(JSON_OBJECT('dateTicket',itin0.TRAVELDATE,'amount',priceTravel,'currencyId',CURRENCYID,'idRoute',r0,'idMRoute',id,'idItinerary',itin0.ID_ITINERARY,'cityIni',ORIGINID,'cityEnd',DESTINYID,'channelSale',CHANNELID,'apply',0,'general',1,'isReturn',1,'isExternal',IFNULL(ORIGINEXTERNALID, DESTINYEXTERNALID))),JSON_ARRAY()))idsPricing,
+	JSON_ARRAY(
+		JSON_MERGE(
+			itin0.DATA_ITINERARY,
+			JSON_OBJECT(
+			'_rowID',1,
+			'id', itin0.ID_ITINERARY,
+			'totalNivel',itin0.LEVELBUS,
+			'itineraryAlias',itin0.ITIN_ALIAS,
+			'travelSeat1',JSON_VALUE(itin0.TRAVELSEAT, '$.free1'),
+			'travelSeat2',JSON_VALUE(itin0.TRAVELSEAT, '$.free2'),	
+			'dateInit',itin0.TRAVELDATE,
+			'dateEnd', itin0.TRAVELENDDATE,
+			'dateEndNext', itin1.TRAVELDATE,
+			'dateInitTz', CONVERT_TZ(itin0.TRAVELDATE,itin0.ZONEINI,'+00:00'),
+			'dateEndTz', CONVERT_TZ(itin0.TRAVELENDDATE,itin0.ZONEEND,'+00:00'),
+			'externalCityEnd', NULL,
+			'externalCityEndID', NULL,
+			'externalCityInit', IF(ORIGINEXTERNALID IS NULL, NULL,FN_GET_CITYBYID(ORIGINEXTERNALID)),
+			'externalCityInitID', IF(ORIGINEXTERNALID IS NULL, NULL,ORIGINEXTERNALID)
+			)
+		),
+		JSON_MERGE(
+			itin1.DATA_ITINERARY,
+			JSON_OBJECT(
+			'_rowID',2,
+			'id', itin1.ID_ITINERARY,
+			'totalNivel',itin1.LEVELBUS,
+			'itineraryAlias',itin1.ITIN_ALIAS,
+			'travelSeat1',JSON_VALUE(itin1.TRAVELSEAT, '$.free1'),
+			'travelSeat2',JSON_VALUE(itin1.TRAVELSEAT, '$.free2'),
+			'dateInit',itin1.TRAVELDATE,
+			'dateEnd', itin1.TRAVELENDDATE,
+			'dateEndNext', itin2.TRAVELDATE,
+			'dateInitTz', CONVERT_TZ(itin1.TRAVELDATE,itin1.ZONEINI,'+00:00'),
+			'dateEndTz', CONVERT_TZ(itin1.TRAVELENDDATE,itin1.ZONEEND,'+00:00'),
+			'externalCityEnd', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 2, FN_GET_CITYBYID(DESTINYEXTERNALID), NULL),
+			'externalCityEndID', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 2, DESTINYEXTERNALID, NULL),
+			'externalCityInit', NULL,
+			'externalCityInitID', NULL			
+			)
+		),
+		IF(mr0.total<3, JSON_OBJECT(), 
+			JSON_MERGE(
+				itin2.DATA_ITINERARY,
+				JSON_OBJECT(
+				'_rowID',3,
+				'id', itin2.ID_ITINERARY,
+				'totalNivel',itin2.LEVELBUS,
+				'itineraryAlias',itin2.ITIN_ALIAS,
+				'travelSeat1',JSON_VALUE(itin2.TRAVELSEAT, '$.free1'),
+				'travelSeat2',JSON_VALUE(itin2.TRAVELSEAT, '$.free2'),
+				'dateInit',itin2.TRAVELDATE,
+				'dateEnd', itin2.TRAVELENDDATE,
+				'dateEndNext', itin3.TRAVELDATE,
+				'dateInitTz', CONVERT_TZ(itin2.TRAVELDATE,itin2.ZONEINI,'+00:00'),
+				'dateEndTz', CONVERT_TZ(itin2.TRAVELENDDATE,itin2.ZONEEND,'+00:00'),
+				'externalCityEnd', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 3, FN_GET_CITYBYID(DESTINYEXTERNALID), NULL),
+				'externalCityEndID', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 3, DESTINYEXTERNALID, NULL),
+				'externalCityInit', NULL,
+				'externalCityInitID', NULL
+				)
+			)
+		),
+		IF(mr0.total<4, JSON_OBJECT(),
+			JSON_MERGE(
+				itin3.DATA_ITINERARY,
+				JSON_OBJECT(
+				'_rowID',4,
+				'id', itin3.ID_ITINERARY,
+				'totalNivel',itin3.LEVELBUS,
+				'itineraryAlias',itin3.ITIN_ALIAS,
+				'travelSeat1',JSON_VALUE(itin3.TRAVELSEAT, '$.free1'),
+				'travelSeat2',JSON_VALUE(itin3.TRAVELSEAT, '$.free2'),
+				'dateInit',itin3.TRAVELDATE,
+				'dateEnd', itin3.TRAVELENDDATE,
+				'dateEndNext', itin4.TRAVELDATE,
+				'dateInitTz', CONVERT_TZ(itin3.TRAVELDATE,itin3.ZONEINI,'+00:00'),
+				'dateEndTz', CONVERT_TZ(itin3.TRAVELENDDATE,itin3.ZONEEND,'+00:00'),
+				'externalCityEnd', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 4, FN_GET_CITYBYID(DESTINYEXTERNALID), NULL),
+				'externalCityEndID', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 4, DESTINYEXTERNALID, NULL),
+				'externalCityInit', NULL,
+				'externalCityInitID', NULL
+				)
+			)
+		),
+		IF(mr0.total<5, JSON_OBJECT(),
+			JSON_MERGE(
+				itin4.DATA_ITINERARY,
+				JSON_OBJECT(
+				'_rowID',5,
+				'id', itin4.ID_ITINERARY,
+				'totalNivel',itin4.LEVELBUS,
+				'itineraryAlias',itin4.ITIN_ALIAS,
+				'travelSeat1',JSON_VALUE(itin4.TRAVELSEAT, '$.free1'),
+				'travelSeat2',JSON_VALUE(itin4.TRAVELSEAT, '$.free2'),
+				'dateInit',itin4.TRAVELDATE,
+				'dateEnd', itin4.TRAVELENDDATE,
+				'dateEndNext', itin4.TRAVELENDDATE,
+				'dateInitTz', CONVERT_TZ(itin4.TRAVELDATE,itin4.ZONEINI,'+00:00'),
+				'dateEndTz', CONVERT_TZ(itin4.TRAVELENDDATE,itin4.ZONEEND,'+00:00'),
+				'externalCityEnd', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 5, FN_GET_CITYBYID(DESTINYEXTERNALID), NULL),
+				'externalCityEndID', IF(DESTINYEXTERNALID IS NOT NULL AND mr0.total = 5, DESTINYEXTERNALID, NULL),
+				'externalCityInit', NULL,
+				'externalCityInitID', NULL
+				)
+			)
+		)
+	)cities
+	FROM M_ROUTE mr0
+	JOIN or_multiple rmul0 ON rmul0.ID_MULTIPLE = mr0.id
+	JOIN TMP_ITINERARY itin0 ON
+		itin0.ID_MULTI = mr0.id AND
+		itin0.ID_ROUTE = r0 AND
+		itin0.TOTAL = mr0.total AND
+		itin0.TRAVELDATE BETWEEN DATEINI AND DATEEND AND
+		itin0.CITY_INI = mr0.citiesInit0 AND
+		itin0.CITY_END = mr0.citiesEnd0
+	JOIN TMP_ITINERARY itin1 ON
+		itin1.ID_MULTI = mr0.id AND
+		itin1.ID_ROUTE = r1 AND
+		itin1.TOTAL = mr0.total AND
+		itin1.TRAVELDATE BETWEEN itin0.TRAVELENDDATEWAIT AND itin0.TRAVELENDDATECONEX AND
+		itin1.CITY_INI = mr0.citiesInit1 AND
+		itin1.CITY_END = mr0.citiesEnd1
+	LEFT JOIN TMP_ITINERARY itin2 ON
+		mr0.total > 2 AND
+		itin2.ID_MULTI = mr0.id AND
+		itin2.TRAVELDATE BETWEEN itin1.TRAVELENDDATEWAIT AND itin1.TRAVELENDDATECONEX AND
+		itin2.ID_ROUTE = r2 AND
+		itin2.TOTAL = mr0.total AND
+		itin2.CITY_INI = mr0.citiesInit2 AND
+		itin2.CITY_END = mr0.citiesEnd2
+	LEFT JOIN TMP_ITINERARY itin3 ON
+		mr0.total > 3 AND
+		itin3.ID_MULTI = mr0.id AND
+		itin3.TRAVELDATE BETWEEN itin2.TRAVELENDDATEWAIT AND itin2.TRAVELENDDATECONEX AND
+		itin3.ID_ROUTE = r3 AND
+		itin3.TOTAL = mr0.total AND
+		itin3.CITY_INI = mr0.citiesInit3 AND
+		itin3.CITY_END = mr0.citiesEnd3
+	LEFT JOIN TMP_ITINERARY itin4 ON
+		mr0.total > 4 AND
+		itin4.ID_MULTI = mr0.id AND
+		itin4.TRAVELDATE BETWEEN itin3.TRAVELENDDATEWAIT AND itin3.TRAVELENDDATECONEX AND
+		itin4.ID_ROUTE = r4 AND
+		itin4.TOTAL = mr0.total AND
+		itin4.CITY_INI = mr0.citiesInit4 AND
+		itin4.CITY_END = mr0.citiesEnd4
+	WHERE
+	CASE mr0.total
+		WHEN 2 THEN itin1.TRAVELDATE >= itin0.TRAVELENDDATE
+		WHEN 3 THEN itin2.TRAVELDATE >= itin1.TRAVELENDDATE AND itin1.TRAVELDATE >= itin0.TRAVELENDDATE
+		WHEN 4 THEN itin3.TRAVELDATE >= itin2.TRAVELENDDATE AND itin2.TRAVELDATE >= itin1.TRAVELENDDATE AND itin1.TRAVELDATE >= itin0.TRAVELENDDATE
+		WHEN 5 THEN itin4.TRAVELDATE >= itin3.TRAVELENDDATE AND itin3.TRAVELDATE >= itin2.TRAVELENDDATE AND itin2.TRAVELDATE >= itin1.TRAVELENDDATE AND itin1.TRAVELDATE >= itin0.TRAVELENDDATE	
+	END
+	HAVING
+	IF(ORIGINEXTERNALID>0, initCityNear IS NOT NULL AND JSON_VALUE(initCityNear,'$.travelDate') >= FILTERDATE, TRUE)
+	AND IF(DESTINYEXTERNALID>0, endCityNear IS NOT NULL, TRUE);
+END$$ 
+
+DELIMITER ;
+```
