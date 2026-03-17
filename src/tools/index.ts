@@ -85,7 +85,6 @@ function buildDelimitedSqlBlock(statements: string[], delimiter: string = ROUTIN
       .filter((statement) => statement.trim().length > 0)
       .map((statement) => `${stripTrailingSqlTerminator(statement)}${delimiter}`),
     "DELIMITER ;",
-    "",
   ].join("\n\n");
 }
 
