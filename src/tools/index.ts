@@ -20,6 +20,7 @@ const queryHistory: Array<{
 }> = [];
 
 let queryIdCounter = 0;
+const ROUTINE_DELIMITER = "$$";
 
 /**
  * Add a query to the history
@@ -60,6 +61,21 @@ export function getQueryHistory(limit: number = 50): typeof queryHistory {
 export function clearQueryHistory(): void {
   queryHistory.length = 0;
   queryIdCounter = 0;
+}
+
+function stripTrailingSqlTerminator(statement: string): string {
+  return statement.trim().replace(/[;\s]+$/g, "");
+}
+
+function buildDelimitedSqlBlock(statements: string[], delimiter: string = ROUTINE_DELIMITER): string {
+  return [
+    `DELIMITER ${delimiter}`,
+    ...statements
+      .filter((statement) => statement.trim().length > 0)
+      .map((statement) => `${stripTrailingSqlTerminator(statement)}${delimiter}`),
+    "DELIMITER ;",
+    "",
+  ].join("\n\n");
 }
 
 // ============================================================================
@@ -726,14 +742,11 @@ export async function mysqlExportSchema(
             proceduresDir,
             `${routine.ROUTINE_NAME}.sql`
           );
-          const procedureSql = [
-            includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
-            `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\`;`,
-            "DELIMITER ;;",
-            `${createProcedureStatement};;`,
-            "DELIMITER ;",
-            "",
-          ].filter(Boolean).join("\n\n");
+          const procedureSql = buildDelimitedSqlBlock([
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+            `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\``,
+            createProcedureStatement,
+          ]);
 
           fs.writeFileSync(procedureFilePath, `${procedureSql}\n`, "utf8");
         }
@@ -749,14 +762,11 @@ export async function mysqlExportSchema(
             functionsDir,
             `${routine.ROUTINE_NAME}.sql`
           );
-          const functionSql = [
-            includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
-            `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\`;`,
-            "DELIMITER ;;",
-            `${createFunctionStatement};;`,
-            "DELIMITER ;",
-            "",
-          ].filter(Boolean).join("\n\n");
+          const functionSql = buildDelimitedSqlBlock([
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+            `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\``,
+            createFunctionStatement,
+          ]);
 
           fs.writeFileSync(functionFilePath, `${functionSql}\n`, "utf8");
         }
@@ -780,10 +790,12 @@ export async function mysqlExportSchema(
         createTriggerResult[0]?.["Create Trigger"];
 
       if (createTriggerStatement) {
-        schemaStatements.push(`DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\`;`);
-        schemaStatements.push("DELIMITER ;;");
-        schemaStatements.push(`${createTriggerStatement};;`);
-        schemaStatements.push("DELIMITER ;");
+        schemaStatements.push(
+          buildDelimitedSqlBlock([
+            `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
+            createTriggerStatement,
+          ])
+        );
       }
     }
 
@@ -803,10 +815,12 @@ export async function mysqlExportSchema(
         createEventResult[0]?.["Create Event"];
 
       if (createEventStatement) {
-        schemaStatements.push(`DROP EVENT IF EXISTS \`${event.EVENT_NAME}\`;`);
-        schemaStatements.push("DELIMITER ;;");
-        schemaStatements.push(`${createEventStatement};;`);
-        schemaStatements.push("DELIMITER ;");
+        schemaStatements.push(
+          buildDelimitedSqlBlock([
+            `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
+            createEventStatement,
+          ])
+        );
       }
     }
 
