@@ -632,11 +632,15 @@ export async function mysqlExportSchema(
     const proceduresDir = path.join(resolvedOutputDir, "procedures");
     const functionsDir = path.join(resolvedOutputDir, "functions");
     const viewsDir = path.join(resolvedOutputDir, "views");
+    const triggersDir = path.join(resolvedOutputDir, "triggers");
+    const eventsDir = path.join(resolvedOutputDir, "events");
 
     fs.mkdirSync(resolvedOutputDir, { recursive: true });
     fs.mkdirSync(proceduresDir, { recursive: true });
     fs.mkdirSync(functionsDir, { recursive: true });
     fs.mkdirSync(viewsDir, { recursive: true });
+    fs.mkdirSync(triggersDir, { recursive: true });
+    fs.mkdirSync(eventsDir, { recursive: true });
 
     if (includeDatabaseStatement) {
       const createDatabaseResult = await executeQuery<any[]>(
@@ -790,6 +794,17 @@ export async function mysqlExportSchema(
         createTriggerResult[0]?.["Create Trigger"];
 
       if (createTriggerStatement) {
+        const triggerFilePath = path.join(
+          triggersDir,
+          `${trigger.TRIGGER_NAME}.sql`
+        );
+        const triggerSql = buildDelimitedSqlBlock([
+          includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+          `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
+          createTriggerStatement,
+        ]);
+
+        fs.writeFileSync(triggerFilePath, `${triggerSql}\n`, "utf8");
         schemaStatements.push(
           buildDelimitedSqlBlock([
             `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
@@ -815,6 +830,17 @@ export async function mysqlExportSchema(
         createEventResult[0]?.["Create Event"];
 
       if (createEventStatement) {
+        const eventFilePath = path.join(
+          eventsDir,
+          `${event.EVENT_NAME}.sql`
+        );
+        const eventSql = buildDelimitedSqlBlock([
+          includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+          `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
+          createEventStatement,
+        ]);
+
+        fs.writeFileSync(eventFilePath, `${eventSql}\n`, "utf8");
         schemaStatements.push(
           buildDelimitedSqlBlock([
             `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
@@ -837,6 +863,8 @@ export async function mysqlExportSchema(
           proceduresDir,
           functionsDir,
           viewsDir,
+          triggersDir,
+          eventsDir,
           includeSampleRows,
           tables: tables.length,
           views: views.length,
@@ -3305,7 +3333,7 @@ export const additionalToolDefinitions = [
       type: "object",
       properties: {
         database: { type: "string", description: "Database name to export. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Absolute or relative folder path where schema.sql and the subfolders procedures/, functions/, and views/ will be created. Optional if MYSQL_SCHEMA_EXPORT_DIR is configured." },
+        outputDir: { type: "string", description: "Absolute or relative folder path where schema.sql and the subfolders procedures/, functions/, views/, triggers/, and events/ will be created. Optional if MYSQL_SCHEMA_EXPORT_DIR is configured." },
         outputPath: { type: "string", description: "Backward-compatible alias of outputDir." },
         includeDatabaseStatement: { type: "boolean", description: "If true, includes CREATE DATABASE and USE statements at the top of the file. Default: true." },
       },
