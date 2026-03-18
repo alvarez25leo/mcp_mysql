@@ -4078,7 +4078,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_export_schema",
-    description: "Export the schema of a MySQL database into a folder on disk. Creates a root schema.sql with database, tables, triggers, and events, plus subfolders named procedures, functions, and views with one .sql file per object. The target folder can be provided directly or taken from MYSQL_SCHEMA_EXPORT_DIR.",
+    description: "Exporta únicamente el esquema SQL a disco. Crea archivos .sql con CREATE/DROP/USE para tablas, views, procedures, functions, triggers y events. Usa este tool cuando el usuario pide 'generar/exportar el esquema', 'dump SQL', o archivos .sql. No genera documentación Markdown ni análisis con IA.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4165,7 +4165,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_document_procedure",
-    description: "Genera un documento Markdown profesional en espanol para un stored procedure y lo guarda en disco. Incluye proposito inferido, parametros, tablas relacionadas, filas de ejemplo, analisis paso a paso y opcionalmente el SQL fuente. Si documentWithAi=true, enriquece el Markdown final usando OpenAI con api key, modelo y template configurados por variables de entorno.",
+    description: "Documenta un solo stored procedure en Markdown y lo guarda en disco. Usa este tool cuando el usuario pide 'documenta este SP' o quiere entender una rutina puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4180,7 +4180,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_document_function",
-    description: "Genera un documento Markdown profesional en espanol para una function de MySQL y lo guarda en disco. Incluye proposito inferido, parametros, tipo de retorno, tablas consultadas, analisis paso a paso y SQL fuente opcional. Si documentWithAi=true, usa OpenAI para pulir el documento final.",
+    description: "Documenta una sola function de MySQL en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta función' o quiere entender una function puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4195,7 +4195,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_document_view",
-    description: "Genera un documento Markdown profesional en espanol para una view y lo guarda en disco. Incluye columnas expuestas, tablas fuente, filas de ejemplo, proposito inferido, analisis paso a paso y SQL fuente opcional. Si documentWithAi=true, usa OpenAI para pulir el documento final.",
+    description: "Documenta una sola view en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta vista' o quiere entender una view puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4210,7 +4210,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_export_procedure_docs",
-    description: "Exporta la documentacion Markdown de todos los stored procedures de una base de datos. Procesa cada SP uno por uno, termina su archivo antes de pasar al siguiente, reescribe el .md con la version actualizada y deja un README dentro de procedures/ explicando la estructura usada para documentar. Si documentWithAi=true, cada archivo se enriquece con OpenAI.",
+    description: "Genera documentación Markdown de todos los stored procedures de la base y la guarda en carpeta. Usa este tool cuando el usuario pide 'documenta todos los SP' o quiere una carpeta completa de documentación de procedures. No exporta el esquema SQL raw. Si documentWithAi=true, cada archivo se enriquece con OpenAI.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4223,7 +4223,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_generate_ai_docs",
-    description: "Genera documentacion completa de una base de datos en forma secuencial. Primero puede crear el data dictionary y luego documenta procedures, functions y views uno por uno, terminando cada archivo detallado antes de pasar al siguiente. Guarda todo en disco y crea un README indice con el resumen. Si documentWithAi=true, usa OpenAI para enriquecer los archivos Markdown generados.",
+    description: "Genera documentación funcional completa en Markdown para la base: data dictionary, procedures, functions y views. Usa este tool cuando el usuario pide 'documenta toda la base', 'genera docs', o quiere contexto funcional para humanos o IA. No es un export de esquema SQL. Si el usuario pide archivos .sql o dump estructural, usa mysql_export_schema en lugar de este tool.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4248,7 +4248,7 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_routine_impact",
-    description: "Busca en qué objetos de la base se usa una stored procedure o function y devuelve el posible impacto de un cambio. Analiza procedures, functions, views, triggers y events. Usa una estrategia robusta para MySQL y MariaDB: prefiltra por metadata cuando puede y valida con SHOW CREATE para evitar depender solo de LIKE truncados.",
+    description: "Analiza impacto de cambio de una stored procedure o function. Busca dónde se usa dentro de procedures, functions, views, triggers y events para saber qué podría romperse si cambias esa rutina. Usa este tool cuando el usuario pregunta 'dónde se usa', 'qué impacta', o 'quién llama a esta function/SP'.",
     inputSchema: {
       type: "object",
       properties: {
