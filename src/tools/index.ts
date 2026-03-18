@@ -25,6 +25,14 @@ let queryIdCounter = 0;
 const ROUTINE_DELIMITER = "$$";
 const templateCache = new Map<string, string>();
 const currentModuleDir = path.dirname(fileURLToPath(import.meta.url));
+let databaseVersionCache:
+  | {
+      version: string;
+      versionComment: string;
+      engine: "MariaDB" | "MySQL" | "Unknown";
+      fullLabel: string;
+    }
+  | undefined;
 let openAiClientCache:
   | {
       apiKey: string;
@@ -86,6 +94,52 @@ function buildDelimitedSqlBlock(statements: string[], delimiter: string = ROUTIN
       .map((statement) => `${stripTrailingSqlTerminator(statement)}${delimiter}`),
     "DELIMITER ;",
   ].join("\n\n");
+}
+
+async function getDatabaseVersionInfo(): Promise<{
+  version: string;
+  versionComment: string;
+  engine: "MariaDB" | "MySQL" | "Unknown";
+  fullLabel: string;
+}> {
+  if (databaseVersionCache) {
+    return databaseVersionCache;
+  }
+
+  const result = await executeQuery<any[]>(
+    `SELECT VERSION() AS version, @@version_comment AS versionComment`
+  );
+  const row = result[0] || {};
+  const version = String(row.version || "").trim();
+  const versionComment = String(row.versionComment || "").trim();
+  const fingerprint = `${version} ${versionComment}`.toLowerCase();
+  const engine = fingerprint.includes("mariadb")
+    ? "MariaDB"
+    : fingerprint.length > 0
+      ? "MySQL"
+      : "Unknown";
+
+  databaseVersionCache = {
+    version,
+    versionComment,
+    engine,
+    fullLabel: [engine, version, versionComment ? `(${versionComment})` : ""]
+      .filter(Boolean)
+      .join(" ")
+      .trim(),
+  };
+
+  return databaseVersionCache;
+}
+
+function buildSqlVersionHeader(versionInfo: {
+  fullLabel: string;
+}): string {
+  return `-- VERSION: ${versionInfo.fullLabel}`;
+}
+
+function prependSqlHeader(content: string, header: string): string {
+  return [header, "", content.trimEnd()].join("\n");
 }
 
 function getAiDocsApiKey(): string | undefined {
@@ -182,6 +236,12 @@ async function renderDocumentationWithOpenAi(args: {
   objectName: string;
   fallbackMarkdown: string;
   context: unknown;
+  versionInfo: {
+    version: string;
+    versionComment: string;
+    engine: "MariaDB" | "MySQL" | "Unknown";
+    fullLabel: string;
+  };
 }): Promise<{ markdown: string; model: string; templatePath: string }> {
   const templatePath = getAiDocsTemplatePath(args.objectType);
   const template = getAiDocsTemplate(args.objectType);
@@ -193,6 +253,7 @@ async function renderDocumentationWithOpenAi(args: {
     "Tu tarea es generar un documento Markdown final y profesional en español.",
     "Debes tomar el TEMPLATE como patrón principal y producir una documentación muy similar en estructura, profundidad, tono y nivel de detalle.",
     "Imita el estilo del ejemplo, adaptándolo fielmente al procedimiento, función o vista real que estás documentando.",
+    "La versión del motor SQL debe quedar visible al inicio del documento.",
     "No inventes tablas, funciones, parámetros ni comportamiento no presentes en el contexto.",
     "Si un dato no está claro, escribe 'No identificado' o explica la limitación brevemente.",
     "Devuelve únicamente Markdown final, sin explicación adicional ni fences.",
@@ -202,6 +263,9 @@ async function renderDocumentationWithOpenAi(args: {
     "",
     "[NOMBRE_OBJETO]",
     args.objectName,
+    "",
+    "[VERSION_BASE_DATOS]",
+    JSON.stringify(args.versionInfo, null, 2),
     "",
     "[TEMPLATE_REFERENCIA]",
     template,
@@ -424,6 +488,7 @@ export async function mysqlDataDictionary(
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{
@@ -540,6 +605,7 @@ export async function mysqlDataDictionary(
 
     const payload = {
       database: targetDatabase,
+      versionInfo,
       totalTables: dictionaryTables.length,
       generatedAt: new Date().toISOString(),
       tables: dictionaryTables,
@@ -604,6 +670,8 @@ function renderDataDictionaryMarkdown(payload: any): string {
   lines.push(`# MySQL Data Dictionary`);
   lines.push("");
   lines.push(`- Database: \`${payload.database}\``);
+  lines.push(`- Engine: \`${payload.versionInfo?.engine || "Unknown"}\``);
+  lines.push(`- Version: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
   lines.push(`- Generated at: \`${payload.generatedAt}\``);
   lines.push(`- Total tables: ${payload.totalTables}`);
   lines.push("");
@@ -754,6 +822,7 @@ export async function mysqlExportSchema(
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{
@@ -793,6 +862,8 @@ export async function mysqlExportSchema(
     fs.mkdirSync(viewsDir, { recursive: true });
     fs.mkdirSync(triggersDir, { recursive: true });
     fs.mkdirSync(eventsDir, { recursive: true });
+
+    schemaStatements.push(buildSqlVersionHeader(versionInfo));
 
     if (includeDatabaseStatement) {
       const createDatabaseResult = await executeQuery<any[]>(
@@ -866,12 +937,11 @@ export async function mysqlExportSchema(
 
       if (createViewStatement) {
         const viewFilePath = path.join(viewsDir, `${view.TABLE_NAME}.sql`);
-        const viewSql = [
+        const viewSql = prependSqlHeader([
           includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
           `DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`,
           `${createViewStatement};`,
-          "",
-        ].filter(Boolean).join("\n\n");
+        ].filter(Boolean).join("\n\n"), buildSqlVersionHeader(versionInfo));
 
         fs.writeFileSync(viewFilePath, `${viewSql}\n`, "utf8");
       }
@@ -898,11 +968,11 @@ export async function mysqlExportSchema(
             proceduresDir,
             `${routine.ROUTINE_NAME}.sql`
           );
-          const procedureSql = buildDelimitedSqlBlock([
+          const procedureSql = prependSqlHeader(buildDelimitedSqlBlock([
             includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
             `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\``,
             createProcedureStatement,
-          ]);
+          ]), buildSqlVersionHeader(versionInfo));
 
           fs.writeFileSync(procedureFilePath, `${procedureSql}\n`, "utf8");
         }
@@ -918,11 +988,11 @@ export async function mysqlExportSchema(
             functionsDir,
             `${routine.ROUTINE_NAME}.sql`
           );
-          const functionSql = buildDelimitedSqlBlock([
+          const functionSql = prependSqlHeader(buildDelimitedSqlBlock([
             includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
             `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\``,
             createFunctionStatement,
-          ]);
+          ]), buildSqlVersionHeader(versionInfo));
 
           fs.writeFileSync(functionFilePath, `${functionSql}\n`, "utf8");
         }
@@ -950,11 +1020,11 @@ export async function mysqlExportSchema(
           triggersDir,
           `${trigger.TRIGGER_NAME}.sql`
         );
-        const triggerSql = buildDelimitedSqlBlock([
+        const triggerSql = prependSqlHeader(buildDelimitedSqlBlock([
           includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
           `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
           createTriggerStatement,
-        ]);
+        ]), buildSqlVersionHeader(versionInfo));
 
         fs.writeFileSync(triggerFilePath, `${triggerSql}\n`, "utf8");
         schemaStatements.push(
@@ -986,11 +1056,11 @@ export async function mysqlExportSchema(
           eventsDir,
           `${event.EVENT_NAME}.sql`
         );
-        const eventSql = buildDelimitedSqlBlock([
+        const eventSql = prependSqlHeader(buildDelimitedSqlBlock([
           includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
           `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
           createEventStatement,
-        ]);
+        ]), buildSqlVersionHeader(versionInfo));
 
         fs.writeFileSync(eventFilePath, `${eventSql}\n`, "utf8");
         schemaStatements.push(
@@ -1012,6 +1082,7 @@ export async function mysqlExportSchema(
           database: targetDatabase,
           outputDir: resolvedOutputDir,
           schemaFile: schemaFilePath,
+          versionInfo,
           proceduresDir,
           functionsDir,
           viewsDir,
@@ -1453,6 +1524,7 @@ export async function mysqlDocumentProcedure(
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1527,6 +1599,7 @@ export async function mysqlDocumentProcedure(
       database: targetDatabase,
       procedureName,
       metadata,
+      versionInfo,
       purpose,
       parameters: paramsResult,
       referencedTables: tableDetails,
@@ -1545,8 +1618,10 @@ export async function mysqlDocumentProcedure(
         objectType: "procedure",
         objectName: procedureName,
         fallbackMarkdown: baseMarkdown,
+        versionInfo,
         context: {
           database: targetDatabase,
+          versionInfo,
           procedureName,
           metadata,
           purpose,
@@ -1581,6 +1656,7 @@ export async function mysqlDocumentProcedure(
           database: targetDatabase,
           procedureName,
           outputFile,
+          versionInfo,
           documentWithAi: shouldUseAi,
           aiModel: aiMetadata?.model || null,
           aiTemplatePath: aiMetadata?.templatePath || null,
@@ -1611,6 +1687,7 @@ export async function mysqlDocumentFunction(
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1674,6 +1751,7 @@ export async function mysqlDocumentFunction(
       database: targetDatabase,
       functionName,
       metadata,
+      versionInfo,
       purpose,
       parameters: paramsResult.filter((param) => param.name),
       referencedTables: tableDetails,
@@ -1691,8 +1769,10 @@ export async function mysqlDocumentFunction(
         objectType: "function",
         objectName: functionName,
         fallbackMarkdown: baseMarkdown,
+        versionInfo,
         context: {
           database: targetDatabase,
+          versionInfo,
           functionName,
           metadata,
           purpose,
@@ -1726,6 +1806,7 @@ export async function mysqlDocumentFunction(
           database: targetDatabase,
           functionName,
           outputFile,
+          versionInfo,
           documentWithAi: shouldUseAi,
           aiModel: aiMetadata?.model || null,
           aiTemplatePath: aiMetadata?.templatePath || null,
@@ -1756,6 +1837,7 @@ export async function mysqlDocumentView(
 }> {
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1802,6 +1884,7 @@ export async function mysqlDocumentView(
       database: targetDatabase,
       viewName,
       metadata: viewInfo[0] || {},
+      versionInfo,
       purpose,
       columns,
       referencedTables: tableDetails,
@@ -1819,8 +1902,10 @@ export async function mysqlDocumentView(
         objectType: "view",
         objectName: viewName,
         fallbackMarkdown: baseMarkdown,
+        versionInfo,
         context: {
           database: targetDatabase,
+          versionInfo,
           viewName,
           metadata: viewInfo[0] || {},
           purpose,
@@ -1854,6 +1939,7 @@ export async function mysqlDocumentView(
           database: targetDatabase,
           viewName,
           outputFile,
+          versionInfo,
           documentWithAi: shouldUseAi,
           aiModel: aiMetadata?.model || null,
           aiTemplatePath: aiMetadata?.templatePath || null,
@@ -1884,6 +1970,7 @@ export async function mysqlExportProcedureDocs(
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
     const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -1932,6 +2019,8 @@ export async function mysqlExportProcedureDocs(
       "",
       "Cada archivo generado debe seguir esta estructura:",
       "",
+      `Motor detectado: ${versionInfo.fullLabel}`,
+      "",
       "1. Resumen Ejecutivo",
       "2. Parametros",
       "3. Tablas Con Las Que Interactua",
@@ -1962,6 +2051,7 @@ export async function mysqlExportProcedureDocs(
         text: JSON.stringify({
           database: targetDatabase,
           outputDir: proceduresDir,
+          versionInfo,
           generatedCount: generated.length,
           generated,
           errors,
@@ -1994,6 +2084,7 @@ export async function mysqlGenerateAiDocs(
   try {
     const targetDatabase = database || process.env.MYSQL_DB;
     const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+    const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
         content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
@@ -2008,11 +2099,13 @@ export async function mysqlGenerateAiDocs(
 
     const summary: {
       database: string;
+      versionInfo: string;
       outputDir: string;
       generated: string[];
       errors: string[];
     } = {
       database: targetDatabase,
+      versionInfo: versionInfo.fullLabel,
       outputDir: baseOutputDir,
       generated: [],
       errors: [],
@@ -2116,6 +2209,8 @@ export async function mysqlGenerateAiDocs(
       `# AI Docs Index`,
       ``,
       `- Base de datos: \`${targetDatabase}\``,
+      `- Motor: \`${versionInfo.engine}\``,
+      `- Versión: \`${versionInfo.fullLabel}\``,
       `- Carpeta: \`${baseOutputDir}\``,
       `- Archivos generados: ${summary.generated.length}`,
       `- Errores: ${summary.errors.length}`,
@@ -2432,6 +2527,8 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
   lines.push(`# Procedure ${payload.procedureName}`);
   lines.push("");
   lines.push(`- Database: \`${payload.database}\``);
+  lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
+  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
   lines.push(`- Purpose: ${payload.purpose}`);
   lines.push(`- Security type: ${payload.metadata.securityType || "unknown"}`);
   lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
@@ -2566,6 +2663,8 @@ function renderFunctionDocumentationMarkdown(payload: any): string {
   lines.push(`# Function ${payload.functionName}`);
   lines.push("");
   lines.push(`- Base de datos: \`${payload.database}\``);
+  lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
+  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
   lines.push(`- Propósito: ${payload.purpose}`);
   lines.push(`- Tipo de retorno: \`${payload.metadata.fullReturnType || payload.metadata.returnType || "desconocido"}\``);
   lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
@@ -2648,6 +2747,8 @@ function renderViewDocumentationMarkdown(payload: any): string {
   lines.push(`# View ${payload.viewName}`);
   lines.push("");
   lines.push(`- Base de datos: \`${payload.database}\``);
+  lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
+  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
   lines.push(`- Propósito: ${payload.purpose}`);
   lines.push(`- Updatable: ${payload.metadata.isUpdatable || "desconocido"}`);
   lines.push(`- Security type: ${payload.metadata.securityType || "desconocido"}`);
