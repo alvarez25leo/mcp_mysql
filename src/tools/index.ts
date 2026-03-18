@@ -2893,6 +2893,396 @@ export async function mysqlShowViews(
   }
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildRoutineUsagePatterns(
+  routineName: string,
+  database: string,
+  routineType: "procedure" | "function" | "auto"
+): Array<{ kind: string; regex: RegExp }> {
+  const escapedName = escapeRegExp(routineName);
+  const escapedDatabase = escapeRegExp(database);
+  const qualifiedPrefix = `(?:\\\`?${escapedDatabase}\\\`?\\s*\\.\\s*)?`;
+  const functionRegex = new RegExp(
+    `(^|[^A-Z0-9_])${qualifiedPrefix}\\\`?${escapedName}\\\`?\\s*\\(`,
+    "im"
+  );
+  const procedureRegex = new RegExp(
+    `\\bCALL\\s+${qualifiedPrefix}\\\`?${escapedName}\\\`?\\s*\\(`,
+    "im"
+  );
+
+  if (routineType === "function") {
+    return [{ kind: "FUNCTION_CALL", regex: functionRegex }];
+  }
+
+  if (routineType === "procedure") {
+    return [{ kind: "PROCEDURE_CALL", regex: procedureRegex }];
+  }
+
+  return [
+    { kind: "PROCEDURE_CALL", regex: procedureRegex },
+    { kind: "FUNCTION_CALL", regex: functionRegex },
+  ];
+}
+
+function extractUsageSnippet(definition: string, matchIndex: number, maxLength: number = 240): string {
+  const start = Math.max(0, matchIndex - Math.floor(maxLength / 2));
+  const end = Math.min(definition.length, matchIndex + Math.floor(maxLength / 2));
+  return definition
+    .slice(start, end)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function mysqlTableExists(schemaName: string, tableName: string): Promise<boolean> {
+  const result = await executeQuery<any[]>(
+    `SELECT 1
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = ?
+       AND TABLE_NAME = ?
+     LIMIT 1`,
+    [schemaName, tableName]
+  );
+
+  return result.length > 0;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  let currentIndex = 0;
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (currentIndex < items.length) {
+      const item = items[currentIndex++];
+      results.push(await worker(item));
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
+}
+
+type RoutineImpactObject = {
+  objectType: "PROCEDURE" | "FUNCTION" | "VIEW" | "TRIGGER" | "EVENT";
+  name: string;
+};
+
+async function getRoutineDefinition(
+  database: string,
+  object: RoutineImpactObject
+): Promise<string | null> {
+  try {
+    if (object.objectType === "PROCEDURE") {
+      const result = await executeQuery<any[]>(
+        `SHOW CREATE PROCEDURE \`${database}\`.\`${object.name}\``
+      );
+      return result[0]?.["Create Procedure"] || null;
+    }
+
+    if (object.objectType === "FUNCTION") {
+      const result = await executeQuery<any[]>(
+        `SHOW CREATE FUNCTION \`${database}\`.\`${object.name}\``
+      );
+      return result[0]?.["Create Function"] || null;
+    }
+
+    if (object.objectType === "VIEW") {
+      const result = await executeQuery<any[]>(
+        `SHOW CREATE VIEW \`${database}\`.\`${object.name}\``
+      );
+      return result[0]?.["Create View"] || result[0]?.["CREATE VIEW"] || null;
+    }
+
+    if (object.objectType === "TRIGGER") {
+      const result = await executeQuery<any[]>(
+        `SHOW CREATE TRIGGER \`${database}\`.\`${object.name}\``
+      );
+      return result[0]?.["SQL Original Statement"] || result[0]?.["Create Trigger"] || null;
+    }
+
+    const result = await executeQuery<any[]>(
+      `SHOW CREATE EVENT \`${database}\`.\`${object.name}\``
+    );
+    return result[0]?.["Create Event"] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getRoutineImpactCandidates(
+  database: string,
+  needle: string,
+  versionInfo: { engine: "MariaDB" | "MySQL" | "Unknown"; fullLabel: string }
+): Promise<{
+  candidates: RoutineImpactObject[];
+  prefilterSources: string[];
+  usedMysqlProc: boolean;
+}> {
+  const likeNeedle = `%${needle}%`;
+  const candidateMap = new Map<string, RoutineImpactObject>();
+  const prefilterSources: string[] = [];
+  let usedMysqlProc = false;
+
+  const addCandidate = (objectType: RoutineImpactObject["objectType"], name: string) => {
+    candidateMap.set(`${objectType}:${name}`, { objectType, name });
+  };
+
+  try {
+    const routines = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name, ROUTINE_TYPE as type
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_DEFINITION LIKE ?`,
+      [database, likeNeedle]
+    );
+    routines.forEach((item) => addCandidate(item.type, item.name));
+    prefilterSources.push("information_schema.ROUTINES");
+  } catch {
+    // ignore prefilter failure and continue with SHOW CREATE fallback later
+  }
+
+  try {
+    const views = await executeQuery<any[]>(
+      `SELECT TABLE_NAME as name
+       FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = ?
+         AND VIEW_DEFINITION LIKE ?`,
+      [database, likeNeedle]
+    );
+    views.forEach((item) => addCandidate("VIEW", item.name));
+    prefilterSources.push("information_schema.VIEWS");
+  } catch {
+    // ignore prefilter failure
+  }
+
+  try {
+    const triggers = await executeQuery<any[]>(
+      `SELECT TRIGGER_NAME as name
+       FROM information_schema.TRIGGERS
+       WHERE TRIGGER_SCHEMA = ?
+         AND ACTION_STATEMENT LIKE ?`,
+      [database, likeNeedle]
+    );
+    triggers.forEach((item) => addCandidate("TRIGGER", item.name));
+    prefilterSources.push("information_schema.TRIGGERS");
+  } catch {
+    // ignore prefilter failure
+  }
+
+  try {
+    const events = await executeQuery<any[]>(
+      `SELECT EVENT_NAME as name
+       FROM information_schema.EVENTS
+       WHERE EVENT_SCHEMA = ?
+         AND EVENT_DEFINITION LIKE ?`,
+      [database, likeNeedle]
+    );
+    events.forEach((item) => addCandidate("EVENT", item.name));
+    prefilterSources.push("information_schema.EVENTS");
+  } catch {
+    // ignore prefilter failure
+  }
+
+  try {
+    if (versionInfo.engine === "MariaDB" || await mysqlTableExists("mysql", "proc")) {
+      const procRows = await executeQuery<any[]>(
+        `SELECT name, type
+         FROM mysql.proc
+         WHERE db = ?
+           AND body LIKE ?`,
+        [database, likeNeedle]
+      );
+      procRows.forEach((item) => addCandidate(item.type, item.name));
+      prefilterSources.push("mysql.proc");
+      usedMysqlProc = true;
+    }
+  } catch {
+    // mysql.proc does not exist or is not accessible
+  }
+
+  return {
+    candidates: Array.from(candidateMap.values()),
+    prefilterSources,
+    usedMysqlProc,
+  };
+}
+
+export async function mysqlRoutineImpact(
+  routineName: string,
+  database?: string,
+  routineType: "auto" | "procedure" | "function" = "auto",
+  includeSnippets: boolean = true
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        isError: true,
+      };
+    }
+
+    const cleanRoutineName = routineName.replace(/[`"' ]/g, "").trim();
+    if (!cleanRoutineName) {
+      return {
+        content: [{ type: "text", text: "Error: routineName is required" }],
+        isError: true,
+      };
+    }
+
+    const versionInfo = await getDatabaseVersionInfo();
+    const resolvedType = routineType === "auto"
+      ? (
+          (await executeQuery<any[]>(
+            `SELECT ROUTINE_TYPE as routineType
+             FROM information_schema.ROUTINES
+             WHERE ROUTINE_SCHEMA = ?
+               AND ROUTINE_NAME = ?
+             LIMIT 1`,
+            [targetDatabase, cleanRoutineName]
+          ))[0]?.routineType?.toLowerCase() || "auto"
+        )
+      : routineType;
+
+    const patterns = buildRoutineUsagePatterns(
+      cleanRoutineName,
+      targetDatabase,
+      resolvedType === "procedure" || resolvedType === "function" ? resolvedType : "auto"
+    );
+
+    const allObjects: RoutineImpactObject[] = [];
+    const routines = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name, ROUTINE_TYPE as objectType
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?`,
+      [targetDatabase]
+    );
+    routines.forEach((item) => {
+      allObjects.push({ objectType: item.objectType, name: item.name });
+    });
+
+    const views = await executeQuery<any[]>(
+      `SELECT TABLE_NAME as name
+       FROM information_schema.VIEWS
+       WHERE TABLE_SCHEMA = ?`,
+      [targetDatabase]
+    );
+    views.forEach((item) => allObjects.push({ objectType: "VIEW", name: item.name }));
+
+    const triggers = await executeQuery<any[]>(
+      `SELECT TRIGGER_NAME as name
+       FROM information_schema.TRIGGERS
+       WHERE TRIGGER_SCHEMA = ?`,
+      [targetDatabase]
+    );
+    triggers.forEach((item) => allObjects.push({ objectType: "TRIGGER", name: item.name }));
+
+    const events = await executeQuery<any[]>(
+      `SELECT EVENT_NAME as name
+       FROM information_schema.EVENTS
+       WHERE EVENT_SCHEMA = ?`,
+      [targetDatabase]
+    );
+    events.forEach((item) => allObjects.push({ objectType: "EVENT", name: item.name }));
+
+    const { candidates, prefilterSources, usedMysqlProc } = await getRoutineImpactCandidates(
+      targetDatabase,
+      cleanRoutineName,
+      versionInfo
+    );
+
+    const shouldScanAllDefinitions = allObjects.length <= 250;
+    const objectsToScan = shouldScanAllDefinitions
+      ? allObjects
+      : (candidates.length > 0 ? candidates : allObjects);
+
+    const findings = await mapWithConcurrency(objectsToScan, 4, async (object) => {
+      if (object.name === cleanRoutineName) {
+        return null;
+      }
+
+      const definition = await getRoutineDefinition(targetDatabase, object);
+      if (!definition) {
+        return null;
+      }
+
+      for (const pattern of patterns) {
+        const match = pattern.regex.exec(definition);
+        if (!match || match.index === undefined) {
+          continue;
+        }
+
+        return {
+          objectType: object.objectType,
+          name: object.name,
+          database: targetDatabase,
+          matchType: pattern.kind,
+          snippet: includeSnippets ? extractUsageSnippet(definition, match.index) : null,
+        };
+      }
+
+      return null;
+    });
+
+    const references = findings
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((left, right) =>
+        left.objectType.localeCompare(right.objectType) || left.name.localeCompare(right.name)
+      );
+
+    const summaryByType = references.reduce<Record<string, number>>((acc, item) => {
+      acc[item.objectType] = (acc[item.objectType] || 0) + 1;
+      return acc;
+    }, {});
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          database: targetDatabase,
+          routineName: cleanRoutineName,
+          requestedRoutineType: routineType,
+          resolvedRoutineType: resolvedType,
+          versionInfo,
+          searchStrategy: {
+            prefilterSources,
+            usedMysqlProc,
+            verifiedWithShowCreate: true,
+            scannedObjects: objectsToScan.length,
+            totalObjectsInDatabase: allObjects.length,
+            scanMode: shouldScanAllDefinitions ? "full-definition-scan" : "prefilter-then-verify",
+          },
+          summary: {
+            totalReferences: references.length,
+            byObjectType: summaryByType,
+          },
+          references,
+          warnings: shouldScanAllDefinitions
+            ? []
+            : ["La base tiene muchos objetos. Se uso prefiltrado por metadata y verificacion con SHOW CREATE para reducir tiempo de respuesta."],
+        }, null, 2),
+      }],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_routine_impact:", error);
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+}
+
 // ============================================================================
 // TOOL: mysql_variables - Show/Set MySQL variables
 // ============================================================================
@@ -3857,6 +4247,20 @@ export const additionalToolDefinitions = [
     },
   },
   {
+    name: "mysql_routine_impact",
+    description: "Busca en qué objetos de la base se usa una stored procedure o function y devuelve el posible impacto de un cambio. Analiza procedures, functions, views, triggers y events. Usa una estrategia robusta para MySQL y MariaDB: prefiltra por metadata cuando puede y valida con SHOW CREATE para evitar depender solo de LIKE truncados.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        routineName: { type: "string", description: "Nombre de la function o stored procedure a buscar." },
+        database: { type: "string", description: "Base de datos donde buscar dependencias. Opcional si MYSQL_DB está configurado." },
+        routineType: { type: "string", enum: ["auto", "procedure", "function"], description: "Tipo de routine buscada. Usa 'auto' para inferirlo. Default: auto." },
+        includeSnippets: { type: "boolean", description: "Si es true, incluye un snippet corto donde se detectó el uso. Default: true." },
+      },
+      required: ["routineName"],
+    },
+  },
+  {
     name: "mysql_variables",
     description: "Show or set MySQL server configuration variables. Use this tool to check current MySQL settings (like max_connections, innodb_buffer_pool_size, etc.) or modify session/global variables. 'session' variables affect only the current connection, 'global' variables affect all new connections. Use 'filter' to search for specific variables by name pattern.",
     inputSchema: {
@@ -4095,6 +4499,14 @@ export async function handleAdditionalTool(
     
     case "mysql_show_views":
       return mysqlShowViews(args.database, args.viewName);
+
+    case "mysql_routine_impact":
+      return mysqlRoutineImpact(
+        args.routineName,
+        args.database,
+        args.routineType,
+        args.includeSnippets
+      );
     
     case "mysql_variables":
       return mysqlVariables(args.action, args.scope, args.filter, args.variable, args.value);
