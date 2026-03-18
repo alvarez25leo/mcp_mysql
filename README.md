@@ -178,7 +178,7 @@ Variables usadas cuando `documentWithAi=true`:
 - `MYSQL_AI_DOCS_ENABLED`: si está en `true`, fuerza el uso de OpenAI aunque no envíes `documentWithAi` en el tool
 - `MYSQL_AI_DOCS_OPENAI_API_KEY` o `OPENAI_API_KEY`: token de OpenAI
 - `MYSQL_AI_DOCS_OPENAI_MODEL`: modelo a usar
-- `MYSQL_AI_DOCS_TEMPLATE_PATH`: template Markdown base. Si no se define, usa `src/template/_template_example_sp.md`
+- `MYSQL_AI_DOCS_TEMPLATE_PATH`: template Markdown base. Si no se define, usa `src/template/_template_example_sp.md` para procedures/views y `src/template/_template_example_function.md` para functions
 
 ### `mysql_document_function`
 

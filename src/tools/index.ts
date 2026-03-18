@@ -108,16 +108,21 @@ function getAiDocsModel(): string {
   return process.env.MYSQL_AI_DOCS_OPENAI_MODEL || "gpt-5";
 }
 
-function getAiDocsTemplatePath(): string {
+function getAiDocsTemplatePath(objectType: "procedure" | "function" | "view"): string {
   const configuredPath = process.env.MYSQL_AI_DOCS_TEMPLATE_PATH;
   if (configuredPath) {
     return path.resolve(configuredPath);
   }
 
+  const fallbackTemplateFile =
+    objectType === "function"
+      ? "_template_example_function.md"
+      : "_template_example_sp.md";
+
   const candidatePaths = [
-    path.resolve(process.cwd(), "src", "template", "_template_example_sp.md"),
-    path.resolve(currentModuleDir, "../template/_template_example_sp.md"),
-    path.resolve(currentModuleDir, "../../../src/template/_template_example_sp.md"),
+    path.resolve(process.cwd(), "src", "template", fallbackTemplateFile),
+    path.resolve(currentModuleDir, `../template/${fallbackTemplateFile}`),
+    path.resolve(currentModuleDir, `../../../src/template/${fallbackTemplateFile}`),
   ];
 
   const existingPath = candidatePaths.find((candidatePath) => fs.existsSync(candidatePath));
@@ -128,8 +133,8 @@ function getAiDocsTemplatePath(): string {
   return candidatePaths[candidatePaths.length - 1];
 }
 
-function getAiDocsTemplate(): string {
-  const templatePath = getAiDocsTemplatePath();
+function getAiDocsTemplate(objectType: "procedure" | "function" | "view"): string {
+  const templatePath = getAiDocsTemplatePath(objectType);
 
   if (!templateCache.has(templatePath)) {
     templateCache.set(templatePath, fs.readFileSync(templatePath, "utf8"));
@@ -178,8 +183,8 @@ async function renderDocumentationWithOpenAi(args: {
   fallbackMarkdown: string;
   context: unknown;
 }): Promise<{ markdown: string; model: string; templatePath: string }> {
-  const templatePath = getAiDocsTemplatePath();
-  const template = getAiDocsTemplate();
+  const templatePath = getAiDocsTemplatePath(args.objectType);
+  const template = getAiDocsTemplate(args.objectType);
   const model = getAiDocsModel();
   const client = getOpenAiClient();
 
