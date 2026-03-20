@@ -49,7 +49,7 @@ export function addToQueryHistory(
   duration: number,
   rowCount: number,
   success: boolean,
-  error?: string
+  error?: string,
 ): void {
   queryHistory.push({
     id: ++queryIdCounter,
@@ -86,12 +86,17 @@ function stripTrailingSqlTerminator(statement: string): string {
   return statement.trim().replace(/[;\s]+$/g, "");
 }
 
-function buildDelimitedSqlBlock(statements: string[], delimiter: string = ROUTINE_DELIMITER): string {
+function buildDelimitedSqlBlock(
+  statements: string[],
+  delimiter: string = ROUTINE_DELIMITER,
+): string {
   return [
     `DELIMITER ${delimiter}`,
     ...statements
       .filter((statement) => statement.trim().length > 0)
-      .map((statement) => `${stripTrailingSqlTerminator(statement)}${delimiter}`),
+      .map(
+        (statement) => `${stripTrailingSqlTerminator(statement)}${delimiter}`,
+      ),
     "DELIMITER ;",
   ].join("\n\n");
 }
@@ -107,7 +112,7 @@ async function getDatabaseVersionInfo(): Promise<{
   }
 
   const result = await executeQuery<any[]>(
-    `SELECT VERSION() AS version, @@version_comment AS versionComment`
+    `SELECT VERSION() AS version, @@version_comment AS versionComment`,
   );
   const row = result[0] || {};
   const version = String(row.version || "").trim();
@@ -132,9 +137,7 @@ async function getDatabaseVersionInfo(): Promise<{
   return databaseVersionCache;
 }
 
-function buildSqlVersionHeader(versionInfo: {
-  fullLabel: string;
-}): string {
+function buildSqlVersionHeader(versionInfo: { fullLabel: string }): string {
   return `-- VERSION: ${versionInfo.fullLabel}`;
 }
 
@@ -151,7 +154,9 @@ function getAiDocsApiKey(): string | undefined {
 }
 
 function isAiDocsEnvEnabled(): boolean {
-  return String(process.env.MYSQL_AI_DOCS_ENABLED || "").toLowerCase() === "true";
+  return (
+    String(process.env.MYSQL_AI_DOCS_ENABLED || "").toLowerCase() === "true"
+  );
 }
 
 function shouldDocumentWithAi(requestedValue: boolean = false): boolean {
@@ -162,7 +167,9 @@ function getAiDocsModel(): string {
   return process.env.MYSQL_AI_DOCS_OPENAI_MODEL || "gpt-5";
 }
 
-function getAiDocsTemplatePath(objectType: "procedure" | "function" | "view"): string {
+function getAiDocsTemplatePath(
+  objectType: "procedure" | "function" | "view",
+): string {
   const configuredPath = process.env.MYSQL_AI_DOCS_TEMPLATE_PATH;
   if (configuredPath) {
     return path.resolve(configuredPath);
@@ -176,10 +183,15 @@ function getAiDocsTemplatePath(objectType: "procedure" | "function" | "view"): s
   const candidatePaths = [
     path.resolve(process.cwd(), "src", "template", fallbackTemplateFile),
     path.resolve(currentModuleDir, `../template/${fallbackTemplateFile}`),
-    path.resolve(currentModuleDir, `../../../src/template/${fallbackTemplateFile}`),
+    path.resolve(
+      currentModuleDir,
+      `../../../src/template/${fallbackTemplateFile}`,
+    ),
   ];
 
-  const existingPath = candidatePaths.find((candidatePath) => fs.existsSync(candidatePath));
+  const existingPath = candidatePaths.find((candidatePath) =>
+    fs.existsSync(candidatePath),
+  );
   if (existingPath) {
     return existingPath;
   }
@@ -187,7 +199,9 @@ function getAiDocsTemplatePath(objectType: "procedure" | "function" | "view"): s
   return candidatePaths[candidatePaths.length - 1];
 }
 
-function getAiDocsTemplate(objectType: "procedure" | "function" | "view"): string {
+function getAiDocsTemplate(
+  objectType: "procedure" | "function" | "view",
+): string {
   const templatePath = getAiDocsTemplatePath(objectType);
 
   if (!templateCache.has(templatePath)) {
@@ -201,11 +215,12 @@ function getOpenAiClient(): OpenAI {
   const apiKey = getAiDocsApiKey();
   if (!apiKey) {
     throw new Error(
-      "OpenAI API key is required when documentWithAi=true. Configure MYSQL_AI_DOCS_OPENAI_API_KEY, OPENAI_API_KEY, or OPENAI_API_TOKEN."
+      "OpenAI API key is required when documentWithAi=true. Configure MYSQL_AI_DOCS_OPENAI_API_KEY, OPENAI_API_KEY, or OPENAI_API_TOKEN.",
     );
   }
 
-  const baseURL = process.env.MYSQL_AI_DOCS_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
+  const baseURL =
+    process.env.MYSQL_AI_DOCS_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL;
 
   if (
     !openAiClientCache ||
@@ -227,7 +242,9 @@ function getOpenAiClient(): OpenAI {
 
 function stripMarkdownCodeFence(markdown: string): string {
   const trimmed = markdown.trim();
-  const fencedMatch = trimmed.match(/^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i);
+  const fencedMatch = trimmed.match(
+    /^```(?:markdown|md)?\s*([\s\S]*?)\s*```$/i,
+  );
   return fencedMatch?.[1]?.trim() || trimmed;
 }
 
@@ -298,19 +315,29 @@ async function renderDocumentationWithOpenAi(args: {
 // TOOL: mysql_explain - Analyze query execution plans
 // ============================================================================
 
-export async function mysqlExplain(sql: string, format: "traditional" | "json" | "tree" = "traditional"): Promise<{
+export async function mysqlExplain(
+  sql: string,
+  format: "traditional" | "json" | "tree" = "traditional",
+): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
     // Validate that it's a SELECT, UPDATE, DELETE, or INSERT query
     const normalizedSql = sql.trim().toUpperCase();
-    if (!normalizedSql.startsWith("SELECT") && 
-        !normalizedSql.startsWith("UPDATE") && 
-        !normalizedSql.startsWith("DELETE") && 
-        !normalizedSql.startsWith("INSERT")) {
+    if (
+      !normalizedSql.startsWith("SELECT") &&
+      !normalizedSql.startsWith("UPDATE") &&
+      !normalizedSql.startsWith("DELETE") &&
+      !normalizedSql.startsWith("INSERT")
+    ) {
       return {
-        content: [{ type: "text", text: "Error: EXPLAIN only works with SELECT, UPDATE, DELETE, or INSERT queries" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: EXPLAIN only works with SELECT, UPDATE, DELETE, or INSERT queries",
+          },
+        ],
         isError: true,
       };
     }
@@ -328,9 +355,11 @@ export async function mysqlExplain(sql: string, format: "traditional" | "json" |
     }
 
     const result = await executeQuery<any[]>(explainSql);
-    
+
     // Also get extended information
-    const analyzeResult = await executeQuery<any[]>(`EXPLAIN ANALYZE ${sql}`).catch(() => null);
+    const analyzeResult = await executeQuery<any[]>(
+      `EXPLAIN ANALYZE ${sql}`,
+    ).catch(() => null);
 
     let response = {
       explainPlan: result,
@@ -348,22 +377,32 @@ export async function mysqlExplain(sql: string, format: "traditional" | "json" |
         const possibleKeys = row.possible_keys || row.Possible_keys;
         const rows = row.rows || row.Rows;
         const extra = row.Extra || row.EXTRA;
-        
+
         if (type === "ALL") {
-          response.suggestions.push(`⚠️ Full table scan detected on '${table}'. Consider adding an index.`);
+          response.suggestions.push(
+            `⚠️ Full table scan detected on '${table}'. Consider adding an index.`,
+          );
         }
         if (type === "index" && rows && rows > 1000) {
-          response.suggestions.push(`⚠️ Index scan on '${table}' returning ${rows} rows. Consider optimizing the query.`);
+          response.suggestions.push(
+            `⚠️ Index scan on '${table}' returning ${rows} rows. Consider optimizing the query.`,
+          );
         }
         if (!key && possibleKeys) {
-          response.suggestions.push(`💡 Possible keys available but not used on '${table}': ${possibleKeys}`);
+          response.suggestions.push(
+            `💡 Possible keys available but not used on '${table}': ${possibleKeys}`,
+          );
         }
         if (extra && typeof extra === "string") {
           if (extra.includes("Using filesort")) {
-            response.suggestions.push(`⚠️ Using filesort on '${table}'. Consider adding an index for ORDER BY columns.`);
+            response.suggestions.push(
+              `⚠️ Using filesort on '${table}'. Consider adding an index for ORDER BY columns.`,
+            );
           }
           if (extra.includes("Using temporary")) {
-            response.suggestions.push(`⚠️ Using temporary table on '${table}'. This may impact performance.`);
+            response.suggestions.push(
+              `⚠️ Using temporary table on '${table}'. This may impact performance.`,
+            );
           }
         }
       }
@@ -380,7 +419,12 @@ export async function mysqlExplain(sql: string, format: "traditional" | "json" |
   } catch (error) {
     log("error", "Error in mysql_explain:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -390,22 +434,31 @@ export async function mysqlExplain(sql: string, format: "traditional" | "json" |
 // TOOL: mysql_describe - Describe table structure
 // ============================================================================
 
-export async function mysqlDescribe(table: string, database?: string): Promise<{
+export async function mysqlDescribe(
+  table: string,
+  database?: string,
+): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const fullTableName = database ? `\`${database}\`.\`${table}\`` : `\`${table}\``;
-    
+    const fullTableName = database
+      ? `\`${database}\`.\`${table}\``
+      : `\`${table}\``;
+
     // Get table structure
     const columns = await executeQuery<any[]>(`DESCRIBE ${fullTableName}`);
-    
+
     // Get indexes
-    const indexes = await executeQuery<any[]>(`SHOW INDEX FROM ${fullTableName}`);
-    
+    const indexes = await executeQuery<any[]>(
+      `SHOW INDEX FROM ${fullTableName}`,
+    );
+
     // Get create table statement
-    const createTable = await executeQuery<any[]>(`SHOW CREATE TABLE ${fullTableName}`);
-    
+    const createTable = await executeQuery<any[]>(
+      `SHOW CREATE TABLE ${fullTableName}`,
+    );
+
     // Get table status
     const statusQuery = database
       ? `SHOW TABLE STATUS FROM \`${database}\` LIKE '${table}'`
@@ -433,7 +486,7 @@ export async function mysqlDescribe(table: string, database?: string): Promise<{
       database: database || "current",
       columns: columns,
       indexes: indexes.reduce((acc: any[], idx: any) => {
-        const existing = acc.find(i => i.keyName === idx.Key_name);
+        const existing = acc.find((i) => i.keyName === idx.Key_name);
         if (existing) {
           existing.columns.push(idx.Column_name);
         } else {
@@ -447,16 +500,18 @@ export async function mysqlDescribe(table: string, database?: string): Promise<{
         return acc;
       }, []),
       foreignKeys: foreignKeys,
-      tableStats: status[0] ? {
-        engine: status[0].Engine,
-        rowCount: status[0].Rows,
-        dataLength: status[0].Data_length,
-        indexLength: status[0].Index_length,
-        autoIncrement: status[0].Auto_increment,
-        createTime: status[0].Create_time,
-        updateTime: status[0].Update_time,
-        collation: status[0].Collation,
-      } : null,
+      tableStats: status[0]
+        ? {
+            engine: status[0].Engine,
+            rowCount: status[0].Rows,
+            dataLength: status[0].Data_length,
+            indexLength: status[0].Index_length,
+            autoIncrement: status[0].Auto_increment,
+            createTime: status[0].Create_time,
+            updateTime: status[0].Update_time,
+            collation: status[0].Collation,
+          }
+        : null,
       createStatement: createTable[0]?.["Create Table"] || null,
     };
 
@@ -467,7 +522,12 @@ export async function mysqlDescribe(table: string, database?: string): Promise<{
   } catch (error) {
     log("error", "Error in mysql_describe:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -481,7 +541,7 @@ export async function mysqlDataDictionary(
   database?: string,
   table?: string,
   format: "json" | "markdown" = "json",
-  sampleRowsLimit: number = 3
+  sampleRowsLimit: number = 3,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -491,10 +551,12 @@ export async function mysqlDataDictionary(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{
-          type: "text",
-          text: "Error: database is required when MYSQL_DB is not configured",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
@@ -512,7 +574,7 @@ export async function mysqlDataDictionary(
          AND TABLE_TYPE = 'BASE TABLE'
          ${table ? "AND TABLE_NAME = ?" : ""}
        ORDER BY TABLE_NAME`,
-      table ? [targetDatabase, table] : [targetDatabase]
+      table ? [targetDatabase, table] : [targetDatabase],
     );
 
     const dictionaryTables = [];
@@ -535,11 +597,11 @@ export async function mysqlDataDictionary(
          WHERE TABLE_SCHEMA = ?
            AND TABLE_NAME = ?
          ORDER BY ORDINAL_POSITION`,
-        [targetDatabase, tableName]
+        [targetDatabase, tableName],
       );
 
       const indexesRaw = await executeQuery<any[]>(
-        `SHOW INDEX FROM \`${targetDatabase}\`.\`${tableName}\``
+        `SHOW INDEX FROM \`${targetDatabase}\`.\`${tableName}\``,
       );
 
       const foreignKeys = await executeQuery<any[]>(
@@ -559,7 +621,7 @@ export async function mysqlDataDictionary(
            AND kcu.TABLE_NAME = ?
            AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
          ORDER BY kcu.ORDINAL_POSITION`,
-        [targetDatabase, tableName]
+        [targetDatabase, tableName],
       );
 
       const sampleRows =
@@ -623,7 +685,12 @@ export async function mysqlDataDictionary(
   } catch (error) {
     log("error", "Error in mysql_data_dictionary:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -632,30 +699,71 @@ export async function mysqlDataDictionary(
 function inferTablePurpose(
   tableName: string,
   columns: any[],
-  foreignKeys: any[]
+  foreignKeys: any[],
 ): string {
   const normalizedTableName = tableName.toLowerCase();
-  const columnNames = columns.map((column) => String(column.name).toLowerCase());
+  const columnNames = columns.map((column) =>
+    String(column.name).toLowerCase(),
+  );
   const hints: string[] = [];
 
-  if (normalizedTableName.includes("user")) hints.push("stores user identities or profiles");
-  if (normalizedTableName.includes("role") || normalizedTableName.includes("permission")) hints.push("models authorization or access control");
-  if (normalizedTableName.includes("log") || normalizedTableName.includes("audit")) hints.push("captures audit trail or operational events");
-  if (normalizedTableName.includes("config") || normalizedTableName.includes("setting")) hints.push("stores configuration values");
-  if (normalizedTableName.includes("session") || normalizedTableName.includes("token")) hints.push("tracks sessions or authentication tokens");
-  if (normalizedTableName.includes("order") || normalizedTableName.includes("invoice")) hints.push("stores transactional or billing records");
-  if (normalizedTableName.includes("detail") || normalizedTableName.includes("item")) hints.push("acts as line-item detail for a parent entity");
-  if (normalizedTableName.includes("catalog") || normalizedTableName.includes("product")) hints.push("stores product or catalog information");
-  if (normalizedTableName.includes("message") || normalizedTableName.includes("notification")) hints.push("stores messages, alerts, or notifications");
+  if (normalizedTableName.includes("user"))
+    hints.push("stores user identities or profiles");
+  if (
+    normalizedTableName.includes("role") ||
+    normalizedTableName.includes("permission")
+  )
+    hints.push("models authorization or access control");
+  if (
+    normalizedTableName.includes("log") ||
+    normalizedTableName.includes("audit")
+  )
+    hints.push("captures audit trail or operational events");
+  if (
+    normalizedTableName.includes("config") ||
+    normalizedTableName.includes("setting")
+  )
+    hints.push("stores configuration values");
+  if (
+    normalizedTableName.includes("session") ||
+    normalizedTableName.includes("token")
+  )
+    hints.push("tracks sessions or authentication tokens");
+  if (
+    normalizedTableName.includes("order") ||
+    normalizedTableName.includes("invoice")
+  )
+    hints.push("stores transactional or billing records");
+  if (
+    normalizedTableName.includes("detail") ||
+    normalizedTableName.includes("item")
+  )
+    hints.push("acts as line-item detail for a parent entity");
+  if (
+    normalizedTableName.includes("catalog") ||
+    normalizedTableName.includes("product")
+  )
+    hints.push("stores product or catalog information");
+  if (
+    normalizedTableName.includes("message") ||
+    normalizedTableName.includes("notification")
+  )
+    hints.push("stores messages, alerts, or notifications");
 
-  if (columnNames.includes("status")) hints.push("contains lifecycle or workflow state");
-  if (columnNames.includes("created_at") || columnNames.includes("updated_at")) hints.push("tracks creation/update timestamps");
+  if (columnNames.includes("status"))
+    hints.push("contains lifecycle or workflow state");
+  if (columnNames.includes("created_at") || columnNames.includes("updated_at"))
+    hints.push("tracks creation/update timestamps");
   if (columnNames.includes("deleted_at")) hints.push("supports soft deletion");
-  if (columnNames.includes("email")) hints.push("contains contact or identity data");
-  if (columnNames.includes("password") || columnNames.includes("password_hash")) hints.push("contains authentication-related data");
+  if (columnNames.includes("email"))
+    hints.push("contains contact or identity data");
+  if (columnNames.includes("password") || columnNames.includes("password_hash"))
+    hints.push("contains authentication-related data");
 
-  if (foreignKeys.length >= 2) hints.push("links multiple business entities through foreign keys");
-  else if (foreignKeys.length === 1) hints.push("references another core entity");
+  if (foreignKeys.length >= 2)
+    hints.push("links multiple business entities through foreign keys");
+  else if (foreignKeys.length === 1)
+    hints.push("references another core entity");
 
   if (hints.length === 0) {
     return "general-purpose application table; infer exact role from business naming and sample rows";
@@ -682,7 +790,9 @@ function renderDataDictionaryMarkdown(payload: any): string {
     lines.push(`- Purpose: ${table.inferredPurpose}`);
     lines.push(`- Engine: ${table.engine || "unknown"}`);
     lines.push(`- Estimated rows: ${table.estimatedRows ?? "unknown"}`);
-    lines.push(`- Primary key: ${table.primaryKey.length > 0 ? table.primaryKey.map((key: string) => `\`${key}\``).join(", ") : "none"}`);
+    lines.push(
+      `- Primary key: ${table.primaryKey.length > 0 ? table.primaryKey.map((key: string) => `\`${key}\``).join(", ") : "none"}`,
+    );
     if (table.comment) {
       lines.push(`- Comment: ${table.comment}`);
     }
@@ -694,7 +804,7 @@ function renderDataDictionaryMarkdown(payload: any): string {
     lines.push(`| --- | --- | --- | --- | --- | --- | --- |`);
     for (const column of table.columns) {
       lines.push(
-        `| \`${column.name}\` | \`${column.columnType}\` | ${column.isNullable} | ${column.columnKey || ""} | ${column.defaultValue ?? ""} | ${column.extra || ""} | ${column.comment || ""} |`
+        `| \`${column.name}\` | \`${column.columnType}\` | ${column.isNullable} | ${column.columnKey || ""} | ${column.defaultValue ?? ""} | ${column.extra || ""} | ${column.comment || ""} |`,
       );
     }
     lines.push("");
@@ -706,7 +816,7 @@ function renderDataDictionaryMarkdown(payload: any): string {
     } else {
       for (const index of table.indexes) {
         lines.push(
-          `- \`${index.keyName}\` (${index.unique ? "unique" : "non-unique"}, ${index.indexType}): ${index.columns.map((column: string) => `\`${column}\``).join(", ")}`
+          `- \`${index.keyName}\` (${index.unique ? "unique" : "non-unique"}, ${index.indexType}): ${index.columns.map((column: string) => `\`${column}\``).join(", ")}`,
         );
       }
     }
@@ -719,7 +829,7 @@ function renderDataDictionaryMarkdown(payload: any): string {
     } else {
       for (const fk of table.foreignKeys) {
         lines.push(
-          `- \`${fk.columnName}\` -> \`${fk.referencedSchema}.${fk.referencedTable}.${fk.referencedColumn}\` (${fk.onUpdate || "?"}/${fk.onDelete || "?"})`
+          `- \`${fk.columnName}\` -> \`${fk.referencedSchema}.${fk.referencedTable}.${fk.referencedColumn}\` (${fk.onUpdate || "?"}/${fk.onDelete || "?"})`,
         );
       }
     }
@@ -749,14 +859,16 @@ export async function mysqlBackup(
   format: "json" | "csv" = "json",
   database?: string,
   whereClause?: string,
-  limit?: number
+  limit?: number,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const fullTableName = database ? `\`${database}\`.\`${table}\`` : `\`${table}\``;
-    
+    const fullTableName = database
+      ? `\`${database}\`.\`${table}\``
+      : `\`${table}\``;
+
     let sql = `SELECT * FROM ${fullTableName}`;
     if (whereClause) {
       sql += ` WHERE ${whereClause}`;
@@ -775,16 +887,21 @@ export async function mysqlBackup(
         const headers = Object.keys(rows[0]);
         const csvRows = [
           headers.join(","),
-          ...rows.map(row => 
-            headers.map(h => {
-              const val = row[h];
-              if (val === null) return "";
-              if (typeof val === "string" && (val.includes(",") || val.includes('"') || val.includes("\n"))) {
-                return `"${val.replace(/"/g, '""')}"`;
-              }
-              return String(val);
-            }).join(",")
-          )
+          ...rows.map((row) =>
+            headers
+              .map((h) => {
+                const val = row[h];
+                if (val === null) return "";
+                if (
+                  typeof val === "string" &&
+                  (val.includes(",") || val.includes('"') || val.includes("\n"))
+                ) {
+                  return `"${val.replace(/"/g, '""')}"`;
+                }
+                return String(val);
+              })
+              .join(","),
+          ),
         ];
         output = csvRows.join("\n");
       }
@@ -795,14 +912,22 @@ export async function mysqlBackup(
     return {
       content: [
         { type: "text", text: output },
-        { type: "text", text: `\n--- Exported ${rows.length} rows from ${table} as ${format.toUpperCase()} ---` },
+        {
+          type: "text",
+          text: `\n--- Exported ${rows.length} rows from ${table} as ${format.toUpperCase()} ---`,
+        },
       ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_backup:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -815,7 +940,7 @@ export async function mysqlBackup(
 export async function mysqlExportSchema(
   database?: string,
   outputDir?: string,
-  includeDatabaseStatement: boolean = true
+  includeDatabaseStatement: boolean = true,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -825,23 +950,28 @@ export async function mysqlExportSchema(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{
-          type: "text",
-          text: "Error: database is required when MYSQL_DB is not configured",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const configuredOutputDir =
-      process.env.MYSQL_SCHEMA_EXPORT_DIR || process.env.MYSQL_SCHEMA_EXPORT_PATH;
+      process.env.MYSQL_SCHEMA_EXPORT_DIR ||
+      process.env.MYSQL_SCHEMA_EXPORT_PATH;
     const finalOutputDir = outputDir || configuredOutputDir;
     if (!finalOutputDir) {
       return {
-        content: [{
-          type: "text",
-          text: "Error: outputDir is required or set MYSQL_SCHEMA_EXPORT_DIR",
-        }],
+        content: [
+          {
+            type: "text",
+            text: "Error: outputDir is required or set MYSQL_SCHEMA_EXPORT_DIR",
+          },
+        ],
         isError: true,
       };
     }
@@ -867,7 +997,7 @@ export async function mysqlExportSchema(
 
     if (includeDatabaseStatement) {
       const createDatabaseResult = await executeQuery<any[]>(
-        `SHOW CREATE DATABASE \`${targetDatabase}\``
+        `SHOW CREATE DATABASE \`${targetDatabase}\``,
       );
       const createDatabaseStatement =
         createDatabaseResult[0]?.["Create Database"] ||
@@ -886,12 +1016,12 @@ export async function mysqlExportSchema(
        WHERE TABLE_SCHEMA = ?
          AND TABLE_TYPE = 'BASE TABLE'
        ORDER BY TABLE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const table of tables) {
       const createTableResult = await executeQuery<any[]>(
-        `SHOW CREATE TABLE \`${targetDatabase}\`.\`${table.TABLE_NAME}\``
+        `SHOW CREATE TABLE \`${targetDatabase}\`.\`${table.TABLE_NAME}\``,
       );
       const createTableStatement =
         createTableResult[0]?.["Create Table"] ||
@@ -902,17 +1032,20 @@ export async function mysqlExportSchema(
         schemaStatements.push(`${createTableStatement};`);
 
         if (includeSampleRows) {
-          const sampleRows = await getTableSampleRows(targetDatabase, table.TABLE_NAME);
+          const sampleRows = await getTableSampleRows(
+            targetDatabase,
+            table.TABLE_NAME,
+          );
           if (sampleRows.length > 0) {
             schemaStatements.push(
               [
                 `-- SAMPLE_ROWS ${table.TABLE_NAME} (up to 3 latest rows)`,
                 ...sampleRows.map((row) => `-- ${JSON.stringify(row)}`),
-              ].join("\n")
+              ].join("\n"),
             );
           } else {
             schemaStatements.push(
-              `-- SAMPLE_ROWS ${table.TABLE_NAME} (no rows found or unable to infer ordering)`
+              `-- SAMPLE_ROWS ${table.TABLE_NAME} (no rows found or unable to infer ordering)`,
             );
           }
         }
@@ -924,12 +1057,12 @@ export async function mysqlExportSchema(
        FROM information_schema.VIEWS
        WHERE TABLE_SCHEMA = ?
        ORDER BY TABLE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const view of views) {
       const createViewResult = await executeQuery<any[]>(
-        `SHOW CREATE VIEW \`${targetDatabase}\`.\`${view.TABLE_NAME}\``
+        `SHOW CREATE VIEW \`${targetDatabase}\`.\`${view.TABLE_NAME}\``,
       );
       const createViewStatement =
         createViewResult[0]?.["Create View"] ||
@@ -937,11 +1070,16 @@ export async function mysqlExportSchema(
 
       if (createViewStatement) {
         const viewFilePath = path.join(viewsDir, `${view.TABLE_NAME}.sql`);
-        const viewSql = prependSqlHeader([
-          includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
-          `DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`,
-          `${createViewStatement};`,
-        ].filter(Boolean).join("\n\n"), buildSqlVersionHeader(versionInfo));
+        const viewSql = prependSqlHeader(
+          [
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`;` : "",
+            `DROP VIEW IF EXISTS \`${view.TABLE_NAME}\`;`,
+            `${createViewStatement};`,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          buildSqlVersionHeader(versionInfo),
+        );
 
         fs.writeFileSync(viewFilePath, `${viewSql}\n`, "utf8");
       }
@@ -952,13 +1090,13 @@ export async function mysqlExportSchema(
        FROM information_schema.ROUTINES
        WHERE ROUTINE_SCHEMA = ?
        ORDER BY ROUTINE_TYPE, ROUTINE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const routine of routines) {
       if (routine.ROUTINE_TYPE === "PROCEDURE") {
         const createProcedureResult = await executeQuery<any[]>(
-          `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``
+          `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``,
         );
         const createProcedureStatement =
           createProcedureResult[0]?.["Create Procedure"];
@@ -966,19 +1104,22 @@ export async function mysqlExportSchema(
         if (createProcedureStatement) {
           const procedureFilePath = path.join(
             proceduresDir,
-            `${routine.ROUTINE_NAME}.sql`
+            `${routine.ROUTINE_NAME}.sql`,
           );
-          const procedureSql = prependSqlHeader(buildDelimitedSqlBlock([
-            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
-            `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\``,
-            createProcedureStatement,
-          ]), buildSqlVersionHeader(versionInfo));
+          const procedureSql = prependSqlHeader(
+            buildDelimitedSqlBlock([
+              includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+              `DROP PROCEDURE IF EXISTS \`${routine.ROUTINE_NAME}\``,
+              createProcedureStatement,
+            ]),
+            buildSqlVersionHeader(versionInfo),
+          );
 
           fs.writeFileSync(procedureFilePath, `${procedureSql}\n`, "utf8");
         }
       } else if (routine.ROUTINE_TYPE === "FUNCTION") {
         const createFunctionResult = await executeQuery<any[]>(
-          `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``
+          `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``,
         );
         const createFunctionStatement =
           createFunctionResult[0]?.["Create Function"];
@@ -986,13 +1127,16 @@ export async function mysqlExportSchema(
         if (createFunctionStatement) {
           const functionFilePath = path.join(
             functionsDir,
-            `${routine.ROUTINE_NAME}.sql`
+            `${routine.ROUTINE_NAME}.sql`,
           );
-          const functionSql = prependSqlHeader(buildDelimitedSqlBlock([
-            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
-            `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\``,
-            createFunctionStatement,
-          ]), buildSqlVersionHeader(versionInfo));
+          const functionSql = prependSqlHeader(
+            buildDelimitedSqlBlock([
+              includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+              `DROP FUNCTION IF EXISTS \`${routine.ROUTINE_NAME}\``,
+              createFunctionStatement,
+            ]),
+            buildSqlVersionHeader(versionInfo),
+          );
 
           fs.writeFileSync(functionFilePath, `${functionSql}\n`, "utf8");
         }
@@ -1004,12 +1148,12 @@ export async function mysqlExportSchema(
        FROM information_schema.TRIGGERS
        WHERE TRIGGER_SCHEMA = ?
        ORDER BY TRIGGER_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const trigger of triggers) {
       const createTriggerResult = await executeQuery<any[]>(
-        `SHOW CREATE TRIGGER \`${targetDatabase}\`.\`${trigger.TRIGGER_NAME}\``
+        `SHOW CREATE TRIGGER \`${targetDatabase}\`.\`${trigger.TRIGGER_NAME}\``,
       );
       const createTriggerStatement =
         createTriggerResult[0]?.["SQL Original Statement"] ||
@@ -1018,20 +1162,23 @@ export async function mysqlExportSchema(
       if (createTriggerStatement) {
         const triggerFilePath = path.join(
           triggersDir,
-          `${trigger.TRIGGER_NAME}.sql`
+          `${trigger.TRIGGER_NAME}.sql`,
         );
-        const triggerSql = prependSqlHeader(buildDelimitedSqlBlock([
-          includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
-          `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
-          createTriggerStatement,
-        ]), buildSqlVersionHeader(versionInfo));
+        const triggerSql = prependSqlHeader(
+          buildDelimitedSqlBlock([
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+            `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
+            createTriggerStatement,
+          ]),
+          buildSqlVersionHeader(versionInfo),
+        );
 
         fs.writeFileSync(triggerFilePath, `${triggerSql}\n`, "utf8");
         schemaStatements.push(
           buildDelimitedSqlBlock([
             `DROP TRIGGER IF EXISTS \`${trigger.TRIGGER_NAME}\``,
             createTriggerStatement,
-          ])
+          ]),
         );
       }
     }
@@ -1041,67 +1188,81 @@ export async function mysqlExportSchema(
        FROM information_schema.EVENTS
        WHERE EVENT_SCHEMA = ?
        ORDER BY EVENT_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const event of events) {
       const createEventResult = await executeQuery<any[]>(
-        `SHOW CREATE EVENT \`${targetDatabase}\`.\`${event.EVENT_NAME}\``
+        `SHOW CREATE EVENT \`${targetDatabase}\`.\`${event.EVENT_NAME}\``,
       );
-      const createEventStatement =
-        createEventResult[0]?.["Create Event"];
+      const createEventStatement = createEventResult[0]?.["Create Event"];
 
       if (createEventStatement) {
-        const eventFilePath = path.join(
-          eventsDir,
-          `${event.EVENT_NAME}.sql`
+        const eventFilePath = path.join(eventsDir, `${event.EVENT_NAME}.sql`);
+        const eventSql = prependSqlHeader(
+          buildDelimitedSqlBlock([
+            includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
+            `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
+            createEventStatement,
+          ]),
+          buildSqlVersionHeader(versionInfo),
         );
-        const eventSql = prependSqlHeader(buildDelimitedSqlBlock([
-          includeDatabaseStatement ? `USE \`${targetDatabase}\`` : "",
-          `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
-          createEventStatement,
-        ]), buildSqlVersionHeader(versionInfo));
 
         fs.writeFileSync(eventFilePath, `${eventSql}\n`, "utf8");
         schemaStatements.push(
           buildDelimitedSqlBlock([
             `DROP EVENT IF EXISTS \`${event.EVENT_NAME}\``,
             createEventStatement,
-          ])
+          ]),
         );
       }
     }
 
     const schemaFilePath = path.join(resolvedOutputDir, "schema.sql");
-    fs.writeFileSync(schemaFilePath, schemaStatements.join("\n\n") + "\n", "utf8");
+    fs.writeFileSync(
+      schemaFilePath,
+      schemaStatements.join("\n\n") + "\n",
+      "utf8",
+    );
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          outputDir: resolvedOutputDir,
-          schemaFile: schemaFilePath,
-          versionInfo,
-          proceduresDir,
-          functionsDir,
-          viewsDir,
-          triggersDir,
-          eventsDir,
-          includeSampleRows,
-          tables: tables.length,
-          views: views.length,
-          routines: routines.length,
-          triggers: triggers.length,
-          events: events.length,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              outputDir: resolvedOutputDir,
+              schemaFile: schemaFilePath,
+              versionInfo,
+              proceduresDir,
+              functionsDir,
+              viewsDir,
+              triggersDir,
+              eventsDir,
+              includeSampleRows,
+              tables: tables.length,
+              views: views.length,
+              routines: routines.length,
+              triggers: triggers.length,
+              events: events.length,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_export_schema:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1110,7 +1271,7 @@ export async function mysqlExportSchema(
 async function getTableSampleRows(
   database: string,
   table: string,
-  limit: number = 3
+  limit: number = 3,
 ): Promise<any[]> {
   try {
     const orderingColumns = await executeQuery<any[]>(
@@ -1119,21 +1280,21 @@ async function getTableSampleRows(
        WHERE TABLE_SCHEMA = ?
          AND TABLE_NAME = ?
        ORDER BY ORDINAL_POSITION`,
-      [database, table]
+      [database, table],
     );
 
     const primaryKeyColumn = orderingColumns.find(
-      (column) => column.COLUMN_KEY === "PRI"
+      (column) => column.COLUMN_KEY === "PRI",
     )?.COLUMN_NAME;
 
     const timestampColumn = orderingColumns.find((column) =>
       ["timestamp", "datetime", "date"].includes(
-        String(column.DATA_TYPE).toLowerCase()
-      )
+        String(column.DATA_TYPE).toLowerCase(),
+      ),
     )?.COLUMN_NAME;
 
     const autoIncrementColumn = orderingColumns.find((column) =>
-      String(column.EXTRA).toLowerCase().includes("auto_increment")
+      String(column.EXTRA).toLowerCase().includes("auto_increment"),
     )?.COLUMN_NAME;
 
     const orderByColumn =
@@ -1158,7 +1319,7 @@ export async function mysqlImport(
   table: string,
   data: any[],
   database?: string,
-  mode: "insert" | "replace" | "upsert" = "insert"
+  mode: "insert" | "replace" | "upsert" = "insert",
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1166,12 +1327,19 @@ export async function mysqlImport(
   try {
     if (!Array.isArray(data) || data.length === 0) {
       return {
-        content: [{ type: "text", text: "Error: Data must be a non-empty array of objects" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: Data must be a non-empty array of objects",
+          },
+        ],
         isError: true,
       };
     }
 
-    const fullTableName = database ? `\`${database}\`.\`${table}\`` : `\`${table}\``;
+    const fullTableName = database
+      ? `\`${database}\`.\`${table}\``
+      : `\`${table}\``;
     const columns = Object.keys(data[0]);
     const pool = await getPool();
     const connection = await pool.getConnection();
@@ -1181,9 +1349,9 @@ export async function mysqlImport(
 
       let insertedCount = 0;
       for (const row of data) {
-        const values = columns.map(col => row[col]);
+        const values = columns.map((col) => row[col]);
         const placeholders = columns.map(() => "?").join(", ");
-        const columnList = columns.map(c => `\`${c}\``).join(", ");
+        const columnList = columns.map((c) => `\`${c}\``).join(", ");
 
         let sql: string;
         switch (mode) {
@@ -1191,7 +1359,9 @@ export async function mysqlImport(
             sql = `REPLACE INTO ${fullTableName} (${columnList}) VALUES (${placeholders})`;
             break;
           case "upsert":
-            const updateClause = columns.map(c => `\`${c}\` = VALUES(\`${c}\`)`).join(", ");
+            const updateClause = columns
+              .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
+              .join(", ");
             sql = `INSERT INTO ${fullTableName} (${columnList}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
             break;
           default:
@@ -1205,7 +1375,12 @@ export async function mysqlImport(
       await connection.commit();
 
       return {
-        content: [{ type: "text", text: `Successfully imported ${insertedCount} rows into ${table} using ${mode} mode` }],
+        content: [
+          {
+            type: "text",
+            text: `Successfully imported ${insertedCount} rows into ${table} using ${mode} mode`,
+          },
+        ],
         isError: false,
       };
     } catch (error) {
@@ -1217,7 +1392,12 @@ export async function mysqlImport(
   } catch (error) {
     log("error", "Error in mysql_import:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1229,7 +1409,7 @@ export async function mysqlImport(
 
 export async function mysqlCompareSchemas(
   sourceDb: string,
-  targetDb: string
+  targetDb: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1238,15 +1418,15 @@ export async function mysqlCompareSchemas(
     // Get tables from both databases
     const sourceTablesResult = await executeQuery<any[]>(
       `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
-      [sourceDb]
+      [sourceDb],
     );
     const targetTablesResult = await executeQuery<any[]>(
       `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
-      [targetDb]
+      [targetDb],
     );
 
-    const sourceTables = new Set(sourceTablesResult.map(t => t.name));
-    const targetTables = new Set(targetTablesResult.map(t => t.name));
+    const sourceTables = new Set(sourceTablesResult.map((t) => t.name));
+    const targetTables = new Set(targetTablesResult.map((t) => t.name));
 
     const differences: any = {
       summary: {
@@ -1276,8 +1456,8 @@ export async function mysqlCompareSchemas(
     }
 
     // Compare common tables
-    const commonTables = [...sourceTables].filter(t => targetTables.has(t));
-    
+    const commonTables = [...sourceTables].filter((t) => targetTables.has(t));
+
     for (const table of commonTables) {
       // Compare columns
       const sourceColumns = await executeQuery<any[]>(
@@ -1285,19 +1465,23 @@ export async function mysqlCompareSchemas(
          FROM information_schema.COLUMNS 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
          ORDER BY ORDINAL_POSITION`,
-        [sourceDb, table]
+        [sourceDb, table],
       );
-      
+
       const targetColumns = await executeQuery<any[]>(
         `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA 
          FROM information_schema.COLUMNS 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
          ORDER BY ORDINAL_POSITION`,
-        [targetDb, table]
+        [targetDb, table],
       );
 
-      const sourceColMap = new Map(sourceColumns.map(c => [c.COLUMN_NAME, c]));
-      const targetColMap = new Map(targetColumns.map(c => [c.COLUMN_NAME, c]));
+      const sourceColMap = new Map(
+        sourceColumns.map((c) => [c.COLUMN_NAME, c]),
+      );
+      const targetColMap = new Map(
+        targetColumns.map((c) => [c.COLUMN_NAME, c]),
+      );
 
       const tableDiff: any = {
         table,
@@ -1312,12 +1496,17 @@ export async function mysqlCompareSchemas(
           tableDiff.columnsOnlyInSource.push(colName);
         } else {
           const targetCol = targetColMap.get(colName)!;
-          if (col.COLUMN_TYPE !== targetCol.COLUMN_TYPE || 
-              col.IS_NULLABLE !== targetCol.IS_NULLABLE) {
+          if (
+            col.COLUMN_TYPE !== targetCol.COLUMN_TYPE ||
+            col.IS_NULLABLE !== targetCol.IS_NULLABLE
+          ) {
             tableDiff.columnTypeDifferences.push({
               column: colName,
               source: { type: col.COLUMN_TYPE, nullable: col.IS_NULLABLE },
-              target: { type: targetCol.COLUMN_TYPE, nullable: targetCol.IS_NULLABLE },
+              target: {
+                type: targetCol.COLUMN_TYPE,
+                nullable: targetCol.IS_NULLABLE,
+              },
             });
           }
         }
@@ -1330,16 +1519,21 @@ export async function mysqlCompareSchemas(
         }
       }
 
-      if (tableDiff.columnsOnlyInSource.length > 0 ||
-          tableDiff.columnsOnlyInTarget.length > 0 ||
-          tableDiff.columnTypeDifferences.length > 0) {
+      if (
+        tableDiff.columnsOnlyInSource.length > 0 ||
+        tableDiff.columnsOnlyInTarget.length > 0 ||
+        tableDiff.columnTypeDifferences.length > 0
+      ) {
         differences.columnDifferences.push(tableDiff);
       }
     }
 
-    differences.summary.tablesOnlyInSource = differences.tablesOnlyInSource.length;
-    differences.summary.tablesOnlyInTarget = differences.tablesOnlyInTarget.length;
-    differences.summary.tablesWithColumnDifferences = differences.columnDifferences.length;
+    differences.summary.tablesOnlyInSource =
+      differences.tablesOnlyInSource.length;
+    differences.summary.tablesOnlyInTarget =
+      differences.tablesOnlyInTarget.length;
+    differences.summary.tablesWithColumnDifferences =
+      differences.columnDifferences.length;
 
     return {
       content: [{ type: "text", text: JSON.stringify(differences, null, 2) }],
@@ -1348,7 +1542,12 @@ export async function mysqlCompareSchemas(
   } catch (error) {
     log("error", "Error in mysql_compare_schemas:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1360,7 +1559,7 @@ export async function mysqlCompareSchemas(
 
 export async function mysqlGenerateMigration(
   sourceDb: string,
-  targetDb: string
+  targetDb: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1383,9 +1582,11 @@ export async function mysqlGenerateMigration(
       migrations.push(`-- ============================================`);
       migrations.push(`-- Tables to ADD to '${targetDb}'`);
       migrations.push(`-- ============================================\n`);
-      
+
       for (const table of diff.tablesOnlyInSource) {
-        const createStmt = await executeQuery<any[]>(`SHOW CREATE TABLE \`${sourceDb}\`.\`${table}\``);
+        const createStmt = await executeQuery<any[]>(
+          `SHOW CREATE TABLE \`${sourceDb}\`.\`${table}\``,
+        );
         if (createStmt[0]) {
           let createSql = createStmt[0]["Create Table"];
           // Replace database name if present
@@ -1399,11 +1600,15 @@ export async function mysqlGenerateMigration(
     // Tables to drop from target (commented out for safety)
     if (diff.tablesOnlyInTarget.length > 0) {
       migrations.push(`-- ============================================`);
-      migrations.push(`-- Tables that exist only in '${targetDb}' (uncomment to drop)`);
+      migrations.push(
+        `-- Tables that exist only in '${targetDb}' (uncomment to drop)`,
+      );
       migrations.push(`-- ============================================\n`);
-      
+
       for (const table of diff.tablesOnlyInTarget) {
-        migrations.push(`-- DROP TABLE IF EXISTS \`${targetDb}\`.\`${table}\`;`);
+        migrations.push(
+          `-- DROP TABLE IF EXISTS \`${targetDb}\`.\`${table}\`;`,
+        );
       }
       migrations.push("");
     }
@@ -1416,31 +1621,41 @@ export async function mysqlGenerateMigration(
 
       for (const tableDiff of diff.columnDifferences) {
         migrations.push(`-- Table: ${tableDiff.table}`);
-        
+
         // Columns to add
         for (const col of tableDiff.columnsOnlyInSource) {
           const colInfo = await executeQuery<any[]>(
             `SELECT COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT 
              FROM information_schema.COLUMNS 
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-            [sourceDb, tableDiff.table, col]
+            [sourceDb, tableDiff.table, col],
           );
           if (colInfo[0]) {
-            const nullable = colInfo[0].IS_NULLABLE === "YES" ? "NULL" : "NOT NULL";
-            const defaultVal = colInfo[0].COLUMN_DEFAULT ? ` DEFAULT '${colInfo[0].COLUMN_DEFAULT}'` : "";
-            migrations.push(`ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` ADD COLUMN \`${col}\` ${colInfo[0].COLUMN_TYPE} ${nullable}${defaultVal};`);
+            const nullable =
+              colInfo[0].IS_NULLABLE === "YES" ? "NULL" : "NOT NULL";
+            const defaultVal = colInfo[0].COLUMN_DEFAULT
+              ? ` DEFAULT '${colInfo[0].COLUMN_DEFAULT}'`
+              : "";
+            migrations.push(
+              `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` ADD COLUMN \`${col}\` ${colInfo[0].COLUMN_TYPE} ${nullable}${defaultVal};`,
+            );
           }
         }
 
         // Columns to drop (commented for safety)
         for (const col of tableDiff.columnsOnlyInTarget) {
-          migrations.push(`-- ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` DROP COLUMN \`${col}\`;`);
+          migrations.push(
+            `-- ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` DROP COLUMN \`${col}\`;`,
+          );
         }
 
         // Column modifications
         for (const colDiff of tableDiff.columnTypeDifferences) {
-          const nullable = colDiff.source.nullable === "YES" ? "NULL" : "NOT NULL";
-          migrations.push(`ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` MODIFY COLUMN \`${colDiff.column}\` ${colDiff.source.type} ${nullable};`);
+          const nullable =
+            colDiff.source.nullable === "YES" ? "NULL" : "NOT NULL";
+          migrations.push(
+            `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` MODIFY COLUMN \`${colDiff.column}\` ${colDiff.source.type} ${nullable};`,
+          );
         }
 
         migrations.push("");
@@ -1458,7 +1673,12 @@ export async function mysqlGenerateMigration(
   } catch (error) {
     log("error", "Error in mysql_generate_migration:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1471,13 +1691,15 @@ export async function mysqlGenerateMigration(
 export async function mysqlCallProcedure(
   procedureName: string,
   params: any[] = [],
-  database?: string
+  database?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const fullProcName = database ? `\`${database}\`.\`${procedureName}\`` : `\`${procedureName}\``;
+    const fullProcName = database
+      ? `\`${database}\`.\`${procedureName}\``
+      : `\`${procedureName}\``;
     const placeholders = params.map(() => "?").join(", ");
     const sql = `CALL ${fullProcName}(${placeholders})`;
 
@@ -1488,11 +1710,14 @@ export async function mysqlCallProcedure(
 
     try {
       const [results] = await connection.query(sql, params);
-      
+
       return {
         content: [
           { type: "text", text: JSON.stringify(results, null, 2) },
-          { type: "text", text: `\n--- Procedure ${procedureName} executed successfully ---` },
+          {
+            type: "text",
+            text: `\n--- Procedure ${procedureName} executed successfully ---`,
+          },
         ],
         isError: false,
       };
@@ -1502,7 +1727,12 @@ export async function mysqlCallProcedure(
   } catch (error) {
     log("error", "Error in mysql_call_procedure:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1517,7 +1747,7 @@ export async function mysqlDocumentProcedure(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  documentWithAi: boolean = false
+  documentWithAi: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1527,20 +1757,30 @@ export async function mysqlDocumentProcedure(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const routineResult = await executeQuery<any[]>(
-      `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${procedureName}\``
+      `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${procedureName}\``,
     );
     const routine = routineResult[0];
     const createSql = routine?.["Create Procedure"];
 
     if (!createSql) {
       return {
-        content: [{ type: "text", text: `Error: procedure '${procedureName}' was not found in database '${targetDatabase}'` }],
+        content: [
+          {
+            type: "text",
+            text: `Error: procedure '${procedureName}' was not found in database '${targetDatabase}'`,
+          },
+        ],
         isError: true,
       };
     }
@@ -1557,7 +1797,7 @@ export async function mysqlDocumentProcedure(
          AND SPECIFIC_NAME = ?
          AND ROUTINE_TYPE = 'PROCEDURE'
        ORDER BY ORDINAL_POSITION`,
-      [targetDatabase, procedureName]
+      [targetDatabase, procedureName],
     );
 
     const metadataResult = await executeQuery<any[]>(
@@ -1575,22 +1815,25 @@ export async function mysqlDocumentProcedure(
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_NAME = ?
          AND ROUTINE_TYPE = 'PROCEDURE'`,
-      [targetDatabase, procedureName]
+      [targetDatabase, procedureName],
     );
 
     const metadata = metadataResult[0] || {};
-    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const referencedTables = extractReferencedTablesFromSql(
+      createSql,
+      targetDatabase,
+    );
     const referencedFunctions = await extractReferencedFunctionsFromSql(
       createSql,
       targetDatabase,
-      procedureName
+      procedureName,
     );
     const workflowSteps = inferProcedureWorkflow(createSql);
     const purpose = inferProcedurePurpose(
       procedureName,
       createSql,
       paramsResult,
-      referencedTables
+      referencedTables,
     );
 
     const tableDetails = await hydrateReferencedTables(referencedTables);
@@ -1641,7 +1884,7 @@ export async function mysqlDocumentProcedure(
     }
 
     const baseOutputDir = path.resolve(
-      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
     );
     const proceduresDir = path.join(baseOutputDir, "procedures");
     const outputFile = path.join(proceduresDir, `${procedureName}.md`);
@@ -1650,26 +1893,39 @@ export async function mysqlDocumentProcedure(
     fs.writeFileSync(outputFile, markdown, "utf8");
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          procedureName,
-          outputFile,
-          versionInfo,
-          documentWithAi: shouldUseAi,
-          aiModel: aiMetadata?.model || null,
-          aiTemplatePath: aiMetadata?.templatePath || null,
-          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
-          workflowSteps: workflowSteps.length,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              procedureName,
+              outputFile,
+              versionInfo,
+              documentWithAi: shouldUseAi,
+              aiModel: aiMetadata?.model || null,
+              aiTemplatePath: aiMetadata?.templatePath || null,
+              referencedTables: tableDetails.map(
+                (item) => `${item.database}.${item.table}`,
+              ),
+              workflowSteps: workflowSteps.length,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_document_procedure:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1680,7 +1936,7 @@ export async function mysqlDocumentFunction(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  documentWithAi: boolean = false
+  documentWithAi: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1690,20 +1946,30 @@ export async function mysqlDocumentFunction(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const functionResult = await executeQuery<any[]>(
-      `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${functionName}\``
+      `SHOW CREATE FUNCTION \`${targetDatabase}\`.\`${functionName}\``,
     );
     const routine = functionResult[0];
     const createSql = routine?.["Create Function"];
 
     if (!createSql) {
       return {
-        content: [{ type: "text", text: `Error: function '${functionName}' was not found in database '${targetDatabase}'` }],
+        content: [
+          {
+            type: "text",
+            text: `Error: function '${functionName}' was not found in database '${targetDatabase}'`,
+          },
+        ],
         isError: true,
       };
     }
@@ -1720,7 +1986,7 @@ export async function mysqlDocumentFunction(
          AND SPECIFIC_NAME = ?
          AND ROUTINE_TYPE = 'FUNCTION'
        ORDER BY ORDINAL_POSITION`,
-      [targetDatabase, functionName]
+      [targetDatabase, functionName],
     );
 
     const metadataResult = await executeQuery<any[]>(
@@ -1738,13 +2004,20 @@ export async function mysqlDocumentFunction(
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_NAME = ?
          AND ROUTINE_TYPE = 'FUNCTION'`,
-      [targetDatabase, functionName]
+      [targetDatabase, functionName],
     );
 
     const metadata = metadataResult[0] || {};
-    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const referencedTables = extractReferencedTablesFromSql(
+      createSql,
+      targetDatabase,
+    );
     const workflowSteps = inferProcedureWorkflow(createSql);
-    const purpose = inferFunctionPurpose(functionName, createSql, referencedTables);
+    const purpose = inferFunctionPurpose(
+      functionName,
+      createSql,
+      referencedTables,
+    );
     const tableDetails = await hydrateReferencedTables(referencedTables);
 
     const baseMarkdown = renderFunctionDocumentationMarkdown({
@@ -1791,7 +2064,7 @@ export async function mysqlDocumentFunction(
     }
 
     const baseOutputDir = path.resolve(
-      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
     );
     const functionsDir = path.join(baseOutputDir, "functions");
     const outputFile = path.join(functionsDir, `${functionName}.md`);
@@ -1800,26 +2073,39 @@ export async function mysqlDocumentFunction(
     fs.writeFileSync(outputFile, markdown, "utf8");
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          functionName,
-          outputFile,
-          versionInfo,
-          documentWithAi: shouldUseAi,
-          aiModel: aiMetadata?.model || null,
-          aiTemplatePath: aiMetadata?.templatePath || null,
-          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
-          workflowSteps: workflowSteps.length,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              functionName,
+              outputFile,
+              versionInfo,
+              documentWithAi: shouldUseAi,
+              aiModel: aiMetadata?.model || null,
+              aiTemplatePath: aiMetadata?.templatePath || null,
+              referencedTables: tableDetails.map(
+                (item) => `${item.database}.${item.table}`,
+              ),
+              workflowSteps: workflowSteps.length,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_document_function:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1830,7 +2116,7 @@ export async function mysqlDocumentView(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  documentWithAi: boolean = false
+  documentWithAi: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1840,20 +2126,30 @@ export async function mysqlDocumentView(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const viewResult = await executeQuery<any[]>(
-      `SHOW CREATE VIEW \`${targetDatabase}\`.\`${viewName}\``
+      `SHOW CREATE VIEW \`${targetDatabase}\`.\`${viewName}\``,
     );
     const viewData = viewResult[0];
     const createSql = viewData?.["Create View"];
 
     if (!createSql) {
       return {
-        content: [{ type: "text", text: `Error: view '${viewName}' was not found in database '${targetDatabase}'` }],
+        content: [
+          {
+            type: "text",
+            text: `Error: view '${viewName}' was not found in database '${targetDatabase}'`,
+          },
+        ],
         isError: true,
       };
     }
@@ -1868,14 +2164,17 @@ export async function mysqlDocumentView(
        FROM information_schema.VIEWS
        WHERE TABLE_SCHEMA = ?
          AND TABLE_NAME = ?`,
-      [targetDatabase, viewName]
+      [targetDatabase, viewName],
     );
 
     const columns = await executeQuery<any[]>(
-      `DESCRIBE \`${targetDatabase}\`.\`${viewName}\``
+      `DESCRIBE \`${targetDatabase}\`.\`${viewName}\``,
     );
 
-    const referencedTables = extractReferencedTablesFromSql(createSql, targetDatabase);
+    const referencedTables = extractReferencedTablesFromSql(
+      createSql,
+      targetDatabase,
+    );
     const workflowSteps = inferProcedureWorkflow(createSql);
     const purpose = inferViewPurpose(viewName, createSql, referencedTables);
     const tableDetails = await hydrateReferencedTables(referencedTables);
@@ -1924,7 +2223,7 @@ export async function mysqlDocumentView(
     }
 
     const baseOutputDir = path.resolve(
-      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
     );
     const viewsDir = path.join(baseOutputDir, "views");
     const outputFile = path.join(viewsDir, `${viewName}.md`);
@@ -1933,26 +2232,39 @@ export async function mysqlDocumentView(
     fs.writeFileSync(outputFile, markdown, "utf8");
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          viewName,
-          outputFile,
-          versionInfo,
-          documentWithAi: shouldUseAi,
-          aiModel: aiMetadata?.model || null,
-          aiTemplatePath: aiMetadata?.templatePath || null,
-          referencedTables: tableDetails.map((item) => `${item.database}.${item.table}`),
-          workflowSteps: workflowSteps.length,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              viewName,
+              outputFile,
+              versionInfo,
+              documentWithAi: shouldUseAi,
+              aiModel: aiMetadata?.model || null,
+              aiTemplatePath: aiMetadata?.templatePath || null,
+              referencedTables: tableDetails.map(
+                (item) => `${item.database}.${item.table}`,
+              ),
+              workflowSteps: workflowSteps.length,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_document_view:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -1962,7 +2274,7 @@ export async function mysqlExportProcedureDocs(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  documentWithAi: boolean = false
+  documentWithAi: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -1973,13 +2285,18 @@ export async function mysqlExportProcedureDocs(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const baseOutputDir = path.resolve(
-      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
     );
     const proceduresDir = path.join(baseOutputDir, "procedures");
     fs.mkdirSync(proceduresDir, { recursive: true });
@@ -1990,7 +2307,7 @@ export async function mysqlExportProcedureDocs(
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_TYPE = 'PROCEDURE'
        ORDER BY ROUTINE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     const generated: string[] = [];
@@ -2002,7 +2319,7 @@ export async function mysqlExportProcedureDocs(
         targetDatabase,
         baseOutputDir,
         includeSourceSql,
-        shouldUseAi
+        shouldUseAi,
       );
 
       if (result.isError) {
@@ -2046,37 +2363,47 @@ export async function mysqlExportProcedureDocs(
     fs.writeFileSync(structureFile, structureGuide + "\n", "utf8");
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          outputDir: proceduresDir,
-          versionInfo,
-          generatedCount: generated.length,
-          generated,
-          errors,
-          structureFile,
-          documentWithAi: shouldUseAi,
-          aiModel: shouldUseAi ? getAiDocsModel() : null,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              outputDir: proceduresDir,
+              versionInfo,
+              generatedCount: generated.length,
+              generated,
+              errors,
+              structureFile,
+              documentWithAi: shouldUseAi,
+              aiModel: shouldUseAi ? getAiDocsModel() : null,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_export_procedure_docs:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
 }
 
-export async function mysqlGenerateAiDocs(
+export async function mysqlExportFunctionDocs(
   database?: string,
   outputDir?: string,
   includeSourceSql: boolean = true,
-  includeDataDictionary: boolean = true,
-  documentWithAi: boolean = false
+  documentWithAi: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -2087,13 +2414,145 @@ export async function mysqlGenerateAiDocs(
     const versionInfo = await getDatabaseVersionInfo();
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
 
     const baseOutputDir = path.resolve(
-      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs"
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
+    );
+    const functionsDir = path.join(baseOutputDir, "functions");
+    fs.mkdirSync(functionsDir, { recursive: true });
+
+    const functions = await executeQuery<any[]>(
+      `SELECT ROUTINE_NAME as name
+       FROM information_schema.ROUTINES
+       WHERE ROUTINE_SCHEMA = ?
+         AND ROUTINE_TYPE = 'FUNCTION'
+       ORDER BY ROUTINE_NAME`,
+      [targetDatabase],
+    );
+
+    const generated: string[] = [];
+    const errors: string[] = [];
+
+    for (const fn of functions) {
+      const result = await mysqlDocumentFunction(
+        fn.name,
+        targetDatabase,
+        baseOutputDir,
+        includeSourceSql,
+        shouldUseAi,
+      );
+
+      if (result.isError) {
+        errors.push(fn.name);
+        continue;
+      }
+
+      const payload = JSON.parse(result.content[0].text);
+      generated.push(payload.outputFile);
+    }
+
+    const structureGuide = [
+      "# Estructura de Documentacion de Functions",
+      "",
+      "Cada archivo generado debe seguir esta estructura:",
+      "",
+      `Motor detectado: ${versionInfo.fullLabel}`,
+      "",
+      "1. Resumen Ejecutivo",
+      "2. Parametros",
+      "3. Tipo de retorno",
+      "4. Tablas Referenciadas",
+      "5. Analisis Paso a Paso",
+      "6. SQL Fuente",
+      "",
+      "Regla de trabajo:",
+      "",
+      "- El proceso documenta una function completa antes de pasar a la siguiente.",
+      "- Cada archivo se reescribe con la version mas reciente de la documentacion.",
+      "- La explicacion debe estar en espanol y orientada a entendimiento humano y de IA.",
+      "",
+      "Functions generadas:",
+      "",
+      ...generated.map((file) => `- ${file}`),
+    ].join("\n");
+
+    const structureFile = path.join(functionsDir, "README.md");
+    fs.writeFileSync(structureFile, structureGuide + "\n", "utf8");
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              outputDir: functionsDir,
+              versionInfo,
+              generatedCount: generated.length,
+              generated,
+              errors,
+              structureFile,
+              documentWithAi: shouldUseAi,
+              aiModel: shouldUseAi ? getAiDocsModel() : null,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_export_function_docs:", error);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
+export async function mysqlGenerateAiDocs(
+  database?: string,
+  outputDir?: string,
+  includeSourceSql: boolean = true,
+  includeDataDictionary: boolean = true,
+  documentWithAi: boolean = false,
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    const shouldUseAi = shouldDocumentWithAi(documentWithAi);
+    const versionInfo = await getDatabaseVersionInfo();
+    if (!targetDatabase) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const baseOutputDir = path.resolve(
+      outputDir || process.env.MYSQL_AI_DOCS_DIR || "docs",
     );
     fs.mkdirSync(baseOutputDir, { recursive: true });
 
@@ -2116,14 +2575,18 @@ export async function mysqlGenerateAiDocs(
         targetDatabase,
         undefined,
         "markdown",
-        3
+        3,
       );
 
       if (dictionaryResult.isError) {
         summary.errors.push("data-dictionary");
       } else {
         const dictionaryFile = path.join(baseOutputDir, "data-dictionary.md");
-        fs.writeFileSync(dictionaryFile, dictionaryResult.content[0].text, "utf8");
+        fs.writeFileSync(
+          dictionaryFile,
+          dictionaryResult.content[0].text,
+          "utf8",
+        );
         summary.generated.push(dictionaryFile);
       }
     }
@@ -2134,7 +2597,7 @@ export async function mysqlGenerateAiDocs(
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_TYPE = 'PROCEDURE'
        ORDER BY ROUTINE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const procedure of procedures) {
@@ -2143,7 +2606,7 @@ export async function mysqlGenerateAiDocs(
         targetDatabase,
         baseOutputDir,
         includeSourceSql,
-        shouldUseAi
+        shouldUseAi,
       );
 
       if (result.isError) {
@@ -2160,7 +2623,7 @@ export async function mysqlGenerateAiDocs(
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_TYPE = 'FUNCTION'
        ORDER BY ROUTINE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const fn of functions) {
@@ -2169,7 +2632,7 @@ export async function mysqlGenerateAiDocs(
         targetDatabase,
         baseOutputDir,
         includeSourceSql,
-        shouldUseAi
+        shouldUseAi,
       );
 
       if (result.isError) {
@@ -2185,7 +2648,7 @@ export async function mysqlGenerateAiDocs(
        FROM information_schema.VIEWS
        WHERE TABLE_SCHEMA = ?
        ORDER BY TABLE_NAME`,
-      [targetDatabase]
+      [targetDatabase],
     );
 
     for (const view of views) {
@@ -2194,7 +2657,7 @@ export async function mysqlGenerateAiDocs(
         targetDatabase,
         baseOutputDir,
         includeSourceSql,
-        shouldUseAi
+        shouldUseAi,
       );
 
       if (result.isError) {
@@ -2238,14 +2701,23 @@ export async function mysqlGenerateAiDocs(
   } catch (error) {
     log("error", "Error in mysql_generate_ai_docs:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
 }
 
 async function hydrateReferencedTables(
-  referencedTables: Array<{ database: string; table: string; operations: string[] }>
+  referencedTables: Array<{
+    database: string;
+    table: string;
+    operations: string[];
+  }>,
 ): Promise<any[]> {
   const tableDetails = [];
 
@@ -2260,10 +2732,14 @@ async function hydrateReferencedTables(
          WHERE TABLE_SCHEMA = ?
            AND TABLE_NAME = ?
          ORDER BY ORDINAL_POSITION`,
-        [reference.database, reference.table]
+        [reference.database, reference.table],
       );
 
-      const sampleRows = await getTableSampleRows(reference.database, reference.table, 2);
+      const sampleRows = await getTableSampleRows(
+        reference.database,
+        reference.table,
+        2,
+      );
       tableDetails.push({
         ...reference,
         columns,
@@ -2283,17 +2759,37 @@ async function hydrateReferencedTables(
 
 function extractReferencedTablesFromSql(
   sql: string,
-  defaultDatabase: string
+  defaultDatabase: string,
 ): Array<{ database: string; table: string; operations: string[] }> {
   const patterns = [
-    { regex: /\bFROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "SELECT" },
-    { regex: /\bJOIN\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "JOIN" },
-    { regex: /\bUPDATE\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "UPDATE" },
-    { regex: /\bINSERT\s+INTO\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "INSERT" },
-    { regex: /\bDELETE\s+FROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi, operation: "DELETE" },
+    {
+      regex: /\bFROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi,
+      operation: "SELECT",
+    },
+    {
+      regex: /\bJOIN\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi,
+      operation: "JOIN",
+    },
+    {
+      regex: /\bUPDATE\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi,
+      operation: "UPDATE",
+    },
+    {
+      regex:
+        /\bINSERT\s+INTO\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi,
+      operation: "INSERT",
+    },
+    {
+      regex:
+        /\bDELETE\s+FROM\s+`?([a-zA-Z0-9_]+)`?(?:\.`?([a-zA-Z0-9_]+)`?)?/gi,
+      operation: "DELETE",
+    },
   ];
 
-  const tableMap = new Map<string, { database: string; table: string; operations: Set<string> }>();
+  const tableMap = new Map<
+    string,
+    { database: string; table: string; operations: Set<string> }
+  >();
 
   for (const pattern of patterns) {
     for (const match of sql.matchAll(pattern.regex)) {
@@ -2328,13 +2824,15 @@ function extractReferencedTablesFromSql(
 async function extractReferencedFunctionsFromSql(
   sql: string,
   defaultDatabase: string,
-  currentProcedureName?: string
-): Promise<Array<{
-  database: string;
-  functionName: string;
-  purpose: string;
-  createSql: string | null;
-}>> {
+  currentProcedureName?: string,
+): Promise<
+  Array<{
+    database: string;
+    functionName: string;
+    purpose: string;
+    createSql: string | null;
+  }>
+> {
   const candidates = new Set<string>();
   const regex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
   const reservedWords = new Set([
@@ -2364,7 +2862,11 @@ async function extractReferencedFunctionsFromSql(
     if (!name) continue;
     const normalized = name.toLowerCase();
     if (reservedWords.has(normalized)) continue;
-    if (currentProcedureName && normalized === currentProcedureName.toLowerCase()) continue;
+    if (
+      currentProcedureName &&
+      normalized === currentProcedureName.toLowerCase()
+    )
+      continue;
     candidates.add(name);
   }
 
@@ -2381,13 +2883,13 @@ async function extractReferencedFunctionsFromSql(
          WHERE ROUTINE_TYPE = 'FUNCTION'
            AND ROUTINE_NAME = ?
            AND ROUTINE_SCHEMA = ?`,
-        [candidate, defaultDatabase]
+        [candidate, defaultDatabase],
       );
 
       if (!routineInfo[0]) continue;
 
       const createResult = await executeQuery<any[]>(
-        `SHOW CREATE FUNCTION \`${defaultDatabase}\`.\`${candidate}\``
+        `SHOW CREATE FUNCTION \`${defaultDatabase}\`.\`${candidate}\``,
       );
       const createSql = createResult[0]?.["Create Function"] || null;
 
@@ -2397,7 +2899,7 @@ async function extractReferencedFunctionsFromSql(
         purpose: inferFunctionPurpose(
           candidate,
           createSql || "",
-          extractReferencedTablesFromSql(createSql || "", defaultDatabase)
+          extractReferencedTablesFromSql(createSql || "", defaultDatabase),
         ),
         createSql,
       });
@@ -2421,15 +2923,24 @@ function inferProcedureWorkflow(sql: string): string[] {
 function explainSqlStepInSpanish(step: string): string {
   const normalized = step.toLowerCase();
 
-  if (normalized.startsWith("select")) return `Consulta datos para validar condiciones, buscar registros o construir el resultado que el procedimiento necesita en este punto. SQL: \`${step}\``;
-  if (normalized.startsWith("insert")) return `Inserta nuevos registros, por lo que este paso genera un efecto persistente en la base de datos y puede impactar procesos posteriores. SQL: \`${step}\``;
-  if (normalized.startsWith("update")) return `Actualiza registros existentes para reflejar un nuevo estado, resultado de negocio o cambio operativo. SQL: \`${step}\``;
-  if (normalized.startsWith("delete")) return `Elimina registros o limpia información previa; este paso debe revisarse con cuidado por su impacto destructivo. SQL: \`${step}\``;
-  if (normalized.startsWith("if")) return `Evalúa una condición de negocio para decidir si continúa por una rama, detiene el flujo o cambia el comportamiento del procedimiento. SQL: \`${step}\``;
-  if (normalized.startsWith("set")) return `Asigna o recalcula variables internas que luego serán usadas en validaciones, decisiones o escritura de datos. SQL: \`${step}\``;
-  if (normalized.startsWith("call")) return `Invoca otro procedimiento almacenado, por lo que este paso delega parte de la lógica y puede introducir efectos secundarios adicionales. SQL: \`${step}\``;
-  if (normalized.startsWith("return")) return `Devuelve un valor o un estado final para el consumidor del procedimiento. SQL: \`${step}\``;
-  if (normalized.startsWith("create")) return `Define la estructura del objeto SQL o parte de su comportamiento declarativo. SQL: \`${step}\``;
+  if (normalized.startsWith("select"))
+    return `Consulta datos para validar condiciones, buscar registros o construir el resultado que el procedimiento necesita en este punto. SQL: \`${step}\``;
+  if (normalized.startsWith("insert"))
+    return `Inserta nuevos registros, por lo que este paso genera un efecto persistente en la base de datos y puede impactar procesos posteriores. SQL: \`${step}\``;
+  if (normalized.startsWith("update"))
+    return `Actualiza registros existentes para reflejar un nuevo estado, resultado de negocio o cambio operativo. SQL: \`${step}\``;
+  if (normalized.startsWith("delete"))
+    return `Elimina registros o limpia información previa; este paso debe revisarse con cuidado por su impacto destructivo. SQL: \`${step}\``;
+  if (normalized.startsWith("if"))
+    return `Evalúa una condición de negocio para decidir si continúa por una rama, detiene el flujo o cambia el comportamiento del procedimiento. SQL: \`${step}\``;
+  if (normalized.startsWith("set"))
+    return `Asigna o recalcula variables internas que luego serán usadas en validaciones, decisiones o escritura de datos. SQL: \`${step}\``;
+  if (normalized.startsWith("call"))
+    return `Invoca otro procedimiento almacenado, por lo que este paso delega parte de la lógica y puede introducir efectos secundarios adicionales. SQL: \`${step}\``;
+  if (normalized.startsWith("return"))
+    return `Devuelve un valor o un estado final para el consumidor del procedimiento. SQL: \`${step}\``;
+  if (normalized.startsWith("create"))
+    return `Define la estructura del objeto SQL o parte de su comportamiento declarativo. SQL: \`${step}\``;
 
   return `Ejecuta una instrucción interna del procedimiento. Conviene revisarla dentro del contexto del paso anterior y del siguiente para entender su efecto completo. SQL: \`${step}\``;
 }
@@ -2496,23 +3007,32 @@ function inferProcedurePurpose(
   procedureName: string,
   sql: string,
   parameters: any[],
-  referencedTables: Array<{ table: string }>
+  referencedTables: Array<{ table: string }>,
 ): string {
   const lowerName = procedureName.toLowerCase();
   const lowerSql = sql.toLowerCase();
   const hints: string[] = [];
 
-  if (lowerName.includes("login") || lowerName.includes("auth")) hints.push("gestiona autenticación o validación de acceso");
-  if (lowerName.includes("create") || lowerName.includes("register")) hints.push("crea nuevos registros de negocio");
-  if (lowerName.includes("update")) hints.push("actualiza registros existentes");
-  if (lowerName.includes("delete") || lowerName.includes("remove")) hints.push("elimina o desactiva registros");
-  if (lowerName.includes("report") || lowerName.includes("summary")) hints.push("construye un resultado de reporte o resumen");
-  if (lowerName.includes("sync") || lowerName.includes("import")) hints.push("sincroniza o importa datos");
+  if (lowerName.includes("login") || lowerName.includes("auth"))
+    hints.push("gestiona autenticación o validación de acceso");
+  if (lowerName.includes("create") || lowerName.includes("register"))
+    hints.push("crea nuevos registros de negocio");
+  if (lowerName.includes("update"))
+    hints.push("actualiza registros existentes");
+  if (lowerName.includes("delete") || lowerName.includes("remove"))
+    hints.push("elimina o desactiva registros");
+  if (lowerName.includes("report") || lowerName.includes("summary"))
+    hints.push("construye un resultado de reporte o resumen");
+  if (lowerName.includes("sync") || lowerName.includes("import"))
+    hints.push("sincroniza o importa datos");
 
   if (lowerSql.includes("transaction")) hints.push("usa control transaccional");
-  if (lowerSql.includes("password") || lowerSql.includes("token")) hints.push("toca datos sensibles de autenticación");
-  if (referencedTables.length > 1) hints.push("coordina lógica sobre múltiples tablas");
-  if (parameters.length > 0) hints.push(`recibe ${parameters.length} parámetros de entrada o salida`);
+  if (lowerSql.includes("password") || lowerSql.includes("token"))
+    hints.push("toca datos sensibles de autenticación");
+  if (referencedTables.length > 1)
+    hints.push("coordina lógica sobre múltiples tablas");
+  if (parameters.length > 0)
+    hints.push(`recibe ${parameters.length} parámetros de entrada o salida`);
 
   return hints.length > 0
     ? hints.slice(0, 4).join("; ")
@@ -2521,19 +3041,29 @@ function inferProcedurePurpose(
 
 function renderProcedureDocumentationMarkdown(payload: any): string {
   const lines: string[] = [];
-  const detailedAnalysis = buildProcedureDetailedAnalysis(payload.workflowSteps);
+  const detailedAnalysis = buildProcedureDetailedAnalysis(
+    payload.workflowSteps,
+  );
   const flowDiagram = buildProcedureFlowDiagram(payload.workflowSteps);
 
   lines.push(`# Procedure ${payload.procedureName}`);
   lines.push("");
   lines.push(`- Database: \`${payload.database}\``);
   lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
-  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
+  lines.push(
+    `- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``,
+  );
   lines.push(`- Purpose: ${payload.purpose}`);
   lines.push(`- Security type: ${payload.metadata.securityType || "unknown"}`);
-  lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
-  lines.push(`- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`);
-  lines.push(`- Determinístico: ${payload.metadata.isDeterministic || "desconocido"}`);
+  lines.push(
+    `- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`,
+  );
+  lines.push(
+    `- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`,
+  );
+  lines.push(
+    `- Determinístico: ${payload.metadata.isDeterministic || "desconocido"}`,
+  );
   if (payload.metadata.comment) {
     lines.push(`- Comentario: ${payload.metadata.comment}`);
   }
@@ -2541,7 +3071,9 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
 
   lines.push(`## Resumen Ejecutivo`);
   lines.push("");
-  lines.push(`Este procedimiento parece ${payload.purpose}. La documentación está pensada para que una persona o una IA pueda entender rápidamente qué hace, qué tablas toca y qué impacto podría tener cambiarlo.`);
+  lines.push(
+    `Este procedimiento parece ${payload.purpose}. La documentación está pensada para que una persona o una IA pueda entender rápidamente qué hace, qué tablas toca y qué impacto podría tener cambiarlo.`,
+  );
   lines.push("");
 
   lines.push(`## Parámetros`);
@@ -2552,7 +3084,9 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
     lines.push(`| Nombre | Modo | Tipo | Tipo Completo |`);
     lines.push(`| --- | --- | --- | --- |`);
     for (const parameter of payload.parameters) {
-      lines.push(`| \`${parameter.name || "(return)"}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`);
+      lines.push(
+        `| \`${parameter.name || "(return)"}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`,
+      );
     }
   }
   lines.push("");
@@ -2560,13 +3094,24 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
   lines.push(`## Tablas Con Las Que Interactúa`);
   lines.push("");
   if (payload.referencedTables.length === 0) {
-    lines.push(`No se pudieron inferir referencias a tablas desde el cuerpo SQL.`);
+    lines.push(
+      `No se pudieron inferir referencias a tablas desde el cuerpo SQL.`,
+    );
   } else {
     for (const table of payload.referencedTables) {
       lines.push(`### ${table.database}.${table.table}`);
       lines.push("");
       lines.push(`- Operaciones detectadas: ${table.operations.join(", ")}`);
-      lines.push(`- Columnas clave: ${table.columns.length > 0 ? table.columns.filter((column: any) => column.columnKey).map((column: any) => `\`${column.name}\``).join(", ") || "ninguna detectada" : "desconocidas"}`);
+      lines.push(
+        `- Columnas clave: ${
+          table.columns.length > 0
+            ? table.columns
+                .filter((column: any) => column.columnKey)
+                .map((column: any) => `\`${column.name}\``)
+                .join(", ") || "ninguna detectada"
+            : "desconocidas"
+        }`,
+      );
       if (table.sampleRows.length > 0) {
         lines.push(`- Filas de ejemplo:`);
         lines.push("```json");
@@ -2602,9 +3147,15 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
 
   lines.push(`## Notas Para Persona / IA`);
   lines.push("");
-  lines.push(`- Revisa este procedimiento junto con las tablas referenciadas antes de cambiar lógica de aplicación.`);
-  lines.push(`- Si este procedimiento participa en login o flujos críticos, revisa quién lo invoca antes de cambiar parámetros o result sets.`);
-  lines.push(`- Valida efectos secundarios sobre tablas con operaciones INSERT/UPDATE/DELETE antes de desplegar cambios.`);
+  lines.push(
+    `- Revisa este procedimiento junto con las tablas referenciadas antes de cambiar lógica de aplicación.`,
+  );
+  lines.push(
+    `- Si este procedimiento participa en login o flujos críticos, revisa quién lo invoca antes de cambiar parámetros o result sets.`,
+  );
+  lines.push(
+    `- Valida efectos secundarios sobre tablas con operaciones INSERT/UPDATE/DELETE antes de desplegar cambios.`,
+  );
   lines.push("");
 
   if (payload.includeSourceSql) {
@@ -2622,16 +3173,21 @@ function renderProcedureDocumentationMarkdown(payload: any): string {
 function inferFunctionPurpose(
   functionName: string,
   sql: string,
-  referencedTables: Array<{ table: string }>
+  referencedTables: Array<{ table: string }>,
 ): string {
   const lowerName = functionName.toLowerCase();
   const hints: string[] = [];
 
-  if (lowerName.includes("calc") || lowerName.includes("total")) hints.push("calcula un valor derivado");
-  if (lowerName.includes("get") || lowerName.includes("find")) hints.push("obtiene un valor a partir de datos existentes");
-  if (lowerName.includes("validate") || lowerName.includes("check")) hints.push("valida una condición de negocio");
-  if (referencedTables.length > 0) hints.push("consulta tablas para producir un resultado");
-  if (sql.toLowerCase().includes("return")) hints.push("devuelve explícitamente un valor final");
+  if (lowerName.includes("calc") || lowerName.includes("total"))
+    hints.push("calcula un valor derivado");
+  if (lowerName.includes("get") || lowerName.includes("find"))
+    hints.push("obtiene un valor a partir de datos existentes");
+  if (lowerName.includes("validate") || lowerName.includes("check"))
+    hints.push("valida una condición de negocio");
+  if (referencedTables.length > 0)
+    hints.push("consulta tablas para producir un resultado");
+  if (sql.toLowerCase().includes("return"))
+    hints.push("devuelve explícitamente un valor final");
 
   return hints.length > 0
     ? hints.slice(0, 4).join("; ")
@@ -2641,16 +3197,20 @@ function inferFunctionPurpose(
 function inferViewPurpose(
   viewName: string,
   sql: string,
-  referencedTables: Array<{ table: string }>
+  referencedTables: Array<{ table: string }>,
 ): string {
   const lowerName = viewName.toLowerCase();
   const hints: string[] = [];
 
-  if (lowerName.includes("report") || lowerName.includes("summary")) hints.push("expone un resumen o reporte listo para consulta");
-  if (lowerName.includes("detail")) hints.push("presenta una vista detallada de una entidad");
+  if (lowerName.includes("report") || lowerName.includes("summary"))
+    hints.push("expone un resumen o reporte listo para consulta");
+  if (lowerName.includes("detail"))
+    hints.push("presenta una vista detallada de una entidad");
   if (lowerName.includes("active")) hints.push("filtra registros activos");
-  if (referencedTables.length > 1) hints.push("consolida datos de varias tablas");
-  if (sql.toLowerCase().includes("join")) hints.push("combina información mediante joins");
+  if (referencedTables.length > 1)
+    hints.push("consolida datos de varias tablas");
+  if (sql.toLowerCase().includes("join"))
+    hints.push("combina información mediante joins");
 
   return hints.length > 0
     ? hints.slice(0, 4).join("; ")
@@ -2664,16 +3224,26 @@ function renderFunctionDocumentationMarkdown(payload: any): string {
   lines.push("");
   lines.push(`- Base de datos: \`${payload.database}\``);
   lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
-  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
+  lines.push(
+    `- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``,
+  );
   lines.push(`- Propósito: ${payload.purpose}`);
-  lines.push(`- Tipo de retorno: \`${payload.metadata.fullReturnType || payload.metadata.returnType || "desconocido"}\``);
-  lines.push(`- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`);
-  lines.push(`- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`);
+  lines.push(
+    `- Tipo de retorno: \`${payload.metadata.fullReturnType || payload.metadata.returnType || "desconocido"}\``,
+  );
+  lines.push(
+    `- Tipo de seguridad: ${payload.metadata.securityType || "desconocido"}`,
+  );
+  lines.push(
+    `- Acceso SQL: ${payload.metadata.sqlDataAccess || "desconocido"}`,
+  );
   lines.push("");
 
   lines.push(`## Resumen Ejecutivo`);
   lines.push("");
-  lines.push(`Esta función parece ${payload.purpose}. La idea de este documento es que una persona o una IA entiendan rápidamente qué calcula, qué datos consulta y qué podría romperse si se modifica.`);
+  lines.push(
+    `Esta función parece ${payload.purpose}. La idea de este documento es que una persona o una IA entiendan rápidamente qué calcula, qué datos consulta y qué podría romperse si se modifica.`,
+  );
   lines.push("");
 
   lines.push(`## Parámetros`);
@@ -2684,7 +3254,9 @@ function renderFunctionDocumentationMarkdown(payload: any): string {
     lines.push(`| Nombre | Modo | Tipo | Tipo Completo |`);
     lines.push(`| --- | --- | --- | --- |`);
     for (const parameter of payload.parameters) {
-      lines.push(`| \`${parameter.name}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`);
+      lines.push(
+        `| \`${parameter.name}\` | ${parameter.mode || "IN"} | ${parameter.dataType || ""} | \`${parameter.fullType || ""}\` |`,
+      );
     }
   }
   lines.push("");
@@ -2695,23 +3267,34 @@ function renderFunctionDocumentationMarkdown(payload: any): string {
     lines.push(`No se detectaron tablas referenciadas.`);
   } else {
     for (const table of payload.referencedTables) {
-      lines.push(`- \`${table.database}.${table.table}\` (${table.operations.join(", ")})`);
+      lines.push(
+        `- \`${table.database}.${table.table}\` (${table.operations.join(", ")})`,
+      );
     }
   }
   lines.push("");
 
   lines.push(`## Funciones Auxiliares Utilizadas`);
   lines.push("");
-  if (!payload.referencedFunctions || payload.referencedFunctions.length === 0) {
-    lines.push(`No se detectaron funciones auxiliares referenciadas dentro del procedimiento.`);
+  if (
+    !payload.referencedFunctions ||
+    payload.referencedFunctions.length === 0
+  ) {
+    lines.push(
+      `No se detectaron funciones auxiliares referenciadas dentro del procedimiento.`,
+    );
   } else {
     for (const fn of payload.referencedFunctions) {
       lines.push(`### ${fn.database}.${fn.functionName}`);
       lines.push("");
       lines.push(`- Uso inferido: ${fn.purpose}`);
-      lines.push(`- Rol dentro del procedimiento: ayuda a encapsular una parte de la lógica para reutilizar cálculos, validaciones o transformaciones sin duplicar código.`);
+      lines.push(
+        `- Rol dentro del procedimiento: ayuda a encapsular una parte de la lógica para reutilizar cálculos, validaciones o transformaciones sin duplicar código.`,
+      );
       if (fn.createSql) {
-        lines.push(`- Definición resumida: se detectó una función almacenada que puede ser clave para entender el resultado final del procedimiento.`);
+        lines.push(
+          `- Definición resumida: se detectó una función almacenada que puede ser clave para entender el resultado final del procedimiento.`,
+        );
       }
       lines.push("");
     }
@@ -2748,16 +3331,22 @@ function renderViewDocumentationMarkdown(payload: any): string {
   lines.push("");
   lines.push(`- Base de datos: \`${payload.database}\``);
   lines.push(`- Motor SQL: \`${payload.versionInfo?.engine || "Unknown"}\``);
-  lines.push(`- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``);
+  lines.push(
+    `- Version del motor: \`${payload.versionInfo?.fullLabel || "Unknown"}\``,
+  );
   lines.push(`- Propósito: ${payload.purpose}`);
   lines.push(`- Updatable: ${payload.metadata.isUpdatable || "desconocido"}`);
-  lines.push(`- Security type: ${payload.metadata.securityType || "desconocido"}`);
+  lines.push(
+    `- Security type: ${payload.metadata.securityType || "desconocido"}`,
+  );
   lines.push(`- Check option: ${payload.metadata.checkOption || "NONE"}`);
   lines.push("");
 
   lines.push(`## Resumen Ejecutivo`);
   lines.push("");
-  lines.push(`Esta vista parece ${payload.purpose}. El objetivo de este documento es explicar qué proyecta, de qué tablas toma datos y cómo debería interpretarse por una persona o por otra IA.`);
+  lines.push(
+    `Esta vista parece ${payload.purpose}. El objetivo de este documento es explicar qué proyecta, de qué tablas toma datos y cómo debería interpretarse por una persona o por otra IA.`,
+  );
   lines.push("");
 
   lines.push(`## Columnas Expuestas`);
@@ -2765,7 +3354,9 @@ function renderViewDocumentationMarkdown(payload: any): string {
   lines.push(`| Nombre | Tipo | Null | Key | Default | Extra |`);
   lines.push(`| --- | --- | --- | --- | --- | --- |`);
   for (const column of payload.columns) {
-    lines.push(`| \`${column.Field}\` | \`${column.Type}\` | ${column.Null} | ${column.Key || ""} | ${column.Default ?? ""} | ${column.Extra || ""} |`);
+    lines.push(
+      `| \`${column.Field}\` | \`${column.Type}\` | ${column.Null} | ${column.Key || ""} | ${column.Default ?? ""} | ${column.Extra || ""} |`,
+    );
   }
   lines.push("");
 
@@ -2817,7 +3408,7 @@ function renderViewDocumentationMarkdown(payload: any): string {
 
 export async function mysqlShowViews(
   database?: string,
-  viewName?: string
+  viewName?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -2825,31 +3416,41 @@ export async function mysqlShowViews(
   try {
     if (viewName) {
       // Get specific view details
-      const fullViewName = database ? `\`${database}\`.\`${viewName}\`` : `\`${viewName}\``;
-      
-      const viewDef = await executeQuery<any[]>(`SHOW CREATE VIEW ${fullViewName}`);
+      const fullViewName = database
+        ? `\`${database}\`.\`${viewName}\``
+        : `\`${viewName}\``;
+
+      const viewDef = await executeQuery<any[]>(
+        `SHOW CREATE VIEW ${fullViewName}`,
+      );
       const viewInfo = await executeQuery<any[]>(
         `SELECT * FROM information_schema.VIEWS WHERE TABLE_NAME = ? ${database ? "AND TABLE_SCHEMA = ?" : ""}`,
-        database ? [viewName, database] : [viewName]
+        database ? [viewName, database] : [viewName],
       );
 
       // Get columns
       const columns = await executeQuery<any[]>(`DESCRIBE ${fullViewName}`);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            viewName,
-            database: database || "current",
-            columns,
-            definition: viewDef[0]?.["Create View"] || null,
-            isUpdatable: viewInfo[0]?.IS_UPDATABLE || null,
-            checkOption: viewInfo[0]?.CHECK_OPTION || null,
-            definer: viewInfo[0]?.DEFINER || null,
-            securityType: viewInfo[0]?.SECURITY_TYPE || null,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                viewName,
+                database: database || "current",
+                columns,
+                definition: viewDef[0]?.["Create View"] || null,
+                isUpdatable: viewInfo[0]?.IS_UPDATABLE || null,
+                checkOption: viewInfo[0]?.CHECK_OPTION || null,
+                definer: viewInfo[0]?.DEFINER || null,
+                securityType: viewInfo[0]?.SECURITY_TYPE || null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
         isError: false,
       };
     } else {
@@ -2874,20 +3475,31 @@ export async function mysqlShowViews(
       const views = await executeQuery<any[]>(sql, params);
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            totalViews: views.length,
-            views,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                totalViews: views.length,
+                views,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
         isError: false,
       };
     }
   } catch (error) {
     log("error", "Error in mysql_show_views:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -2900,18 +3512,18 @@ function escapeRegExp(value: string): string {
 function buildRoutineUsagePatterns(
   routineName: string,
   database: string,
-  routineType: "procedure" | "function" | "auto"
+  routineType: "procedure" | "function" | "auto",
 ): Array<{ kind: string; regex: RegExp }> {
   const escapedName = escapeRegExp(routineName);
   const escapedDatabase = escapeRegExp(database);
   const qualifiedPrefix = `(?:\\\`?${escapedDatabase}\\\`?\\s*\\.\\s*)?`;
   const functionRegex = new RegExp(
     `(^|[^A-Z0-9_])${qualifiedPrefix}\\\`?${escapedName}\\\`?\\s*\\(`,
-    "im"
+    "im",
   );
   const procedureRegex = new RegExp(
     `\\bCALL\\s+${qualifiedPrefix}\\\`?${escapedName}\\\`?\\s*\\(`,
-    "im"
+    "im",
   );
 
   if (routineType === "function") {
@@ -2928,23 +3540,30 @@ function buildRoutineUsagePatterns(
   ];
 }
 
-function extractUsageSnippet(definition: string, matchIndex: number, maxLength: number = 240): string {
+function extractUsageSnippet(
+  definition: string,
+  matchIndex: number,
+  maxLength: number = 240,
+): string {
   const start = Math.max(0, matchIndex - Math.floor(maxLength / 2));
-  const end = Math.min(definition.length, matchIndex + Math.floor(maxLength / 2));
-  return definition
-    .slice(start, end)
-    .replace(/\s+/g, " ")
-    .trim();
+  const end = Math.min(
+    definition.length,
+    matchIndex + Math.floor(maxLength / 2),
+  );
+  return definition.slice(start, end).replace(/\s+/g, " ").trim();
 }
 
-async function mysqlTableExists(schemaName: string, tableName: string): Promise<boolean> {
+async function mysqlTableExists(
+  schemaName: string,
+  tableName: string,
+): Promise<boolean> {
   const result = await executeQuery<any[]>(
     `SELECT 1
      FROM information_schema.TABLES
      WHERE TABLE_SCHEMA = ?
        AND TABLE_NAME = ?
      LIMIT 1`,
-    [schemaName, tableName]
+    [schemaName, tableName],
   );
 
   return result.length > 0;
@@ -2953,17 +3572,20 @@ async function mysqlTableExists(schemaName: string, tableName: string): Promise<
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
-  worker: (item: T) => Promise<R>
+  worker: (item: T) => Promise<R>,
 ): Promise<R[]> {
   const results: R[] = [];
   let currentIndex = 0;
 
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (currentIndex < items.length) {
-      const item = items[currentIndex++];
-      results.push(await worker(item));
-    }
-  });
+  const runners = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (currentIndex < items.length) {
+        const item = items[currentIndex++];
+        results.push(await worker(item));
+      }
+    },
+  );
 
   await Promise.all(runners);
   return results;
@@ -2976,39 +3598,43 @@ type RoutineImpactObject = {
 
 async function getRoutineDefinition(
   database: string,
-  object: RoutineImpactObject
+  object: RoutineImpactObject,
 ): Promise<string | null> {
   try {
     if (object.objectType === "PROCEDURE") {
       const result = await executeQuery<any[]>(
-        `SHOW CREATE PROCEDURE \`${database}\`.\`${object.name}\``
+        `SHOW CREATE PROCEDURE \`${database}\`.\`${object.name}\``,
       );
       return result[0]?.["Create Procedure"] || null;
     }
 
     if (object.objectType === "FUNCTION") {
       const result = await executeQuery<any[]>(
-        `SHOW CREATE FUNCTION \`${database}\`.\`${object.name}\``
+        `SHOW CREATE FUNCTION \`${database}\`.\`${object.name}\``,
       );
       return result[0]?.["Create Function"] || null;
     }
 
     if (object.objectType === "VIEW") {
       const result = await executeQuery<any[]>(
-        `SHOW CREATE VIEW \`${database}\`.\`${object.name}\``
+        `SHOW CREATE VIEW \`${database}\`.\`${object.name}\``,
       );
       return result[0]?.["Create View"] || result[0]?.["CREATE VIEW"] || null;
     }
 
     if (object.objectType === "TRIGGER") {
       const result = await executeQuery<any[]>(
-        `SHOW CREATE TRIGGER \`${database}\`.\`${object.name}\``
+        `SHOW CREATE TRIGGER \`${database}\`.\`${object.name}\``,
       );
-      return result[0]?.["SQL Original Statement"] || result[0]?.["Create Trigger"] || null;
+      return (
+        result[0]?.["SQL Original Statement"] ||
+        result[0]?.["Create Trigger"] ||
+        null
+      );
     }
 
     const result = await executeQuery<any[]>(
-      `SHOW CREATE EVENT \`${database}\`.\`${object.name}\``
+      `SHOW CREATE EVENT \`${database}\`.\`${object.name}\``,
     );
     return result[0]?.["Create Event"] || null;
   } catch {
@@ -3019,7 +3645,7 @@ async function getRoutineDefinition(
 async function getRoutineImpactCandidates(
   database: string,
   needle: string,
-  versionInfo: { engine: "MariaDB" | "MySQL" | "Unknown"; fullLabel: string }
+  versionInfo: { engine: "MariaDB" | "MySQL" | "Unknown"; fullLabel: string },
 ): Promise<{
   candidates: RoutineImpactObject[];
   prefilterSources: string[];
@@ -3030,7 +3656,10 @@ async function getRoutineImpactCandidates(
   const prefilterSources: string[] = [];
   let usedMysqlProc = false;
 
-  const addCandidate = (objectType: RoutineImpactObject["objectType"], name: string) => {
+  const addCandidate = (
+    objectType: RoutineImpactObject["objectType"],
+    name: string,
+  ) => {
     candidateMap.set(`${objectType}:${name}`, { objectType, name });
   };
 
@@ -3040,7 +3669,7 @@ async function getRoutineImpactCandidates(
        FROM information_schema.ROUTINES
        WHERE ROUTINE_SCHEMA = ?
          AND ROUTINE_DEFINITION LIKE ?`,
-      [database, likeNeedle]
+      [database, likeNeedle],
     );
     routines.forEach((item) => addCandidate(item.type, item.name));
     prefilterSources.push("information_schema.ROUTINES");
@@ -3054,7 +3683,7 @@ async function getRoutineImpactCandidates(
        FROM information_schema.VIEWS
        WHERE TABLE_SCHEMA = ?
          AND VIEW_DEFINITION LIKE ?`,
-      [database, likeNeedle]
+      [database, likeNeedle],
     );
     views.forEach((item) => addCandidate("VIEW", item.name));
     prefilterSources.push("information_schema.VIEWS");
@@ -3068,7 +3697,7 @@ async function getRoutineImpactCandidates(
        FROM information_schema.TRIGGERS
        WHERE TRIGGER_SCHEMA = ?
          AND ACTION_STATEMENT LIKE ?`,
-      [database, likeNeedle]
+      [database, likeNeedle],
     );
     triggers.forEach((item) => addCandidate("TRIGGER", item.name));
     prefilterSources.push("information_schema.TRIGGERS");
@@ -3082,7 +3711,7 @@ async function getRoutineImpactCandidates(
        FROM information_schema.EVENTS
        WHERE EVENT_SCHEMA = ?
          AND EVENT_DEFINITION LIKE ?`,
-      [database, likeNeedle]
+      [database, likeNeedle],
     );
     events.forEach((item) => addCandidate("EVENT", item.name));
     prefilterSources.push("information_schema.EVENTS");
@@ -3091,13 +3720,16 @@ async function getRoutineImpactCandidates(
   }
 
   try {
-    if (versionInfo.engine === "MariaDB" || await mysqlTableExists("mysql", "proc")) {
+    if (
+      versionInfo.engine === "MariaDB" ||
+      (await mysqlTableExists("mysql", "proc"))
+    ) {
       const procRows = await executeQuery<any[]>(
         `SELECT name, type
          FROM mysql.proc
          WHERE db = ?
            AND body LIKE ?`,
-        [database, likeNeedle]
+        [database, likeNeedle],
       );
       procRows.forEach((item) => addCandidate(item.type, item.name));
       prefilterSources.push("mysql.proc");
@@ -3118,7 +3750,7 @@ export async function mysqlRoutineImpact(
   routineName: string,
   database?: string,
   routineType: "auto" | "procedure" | "function" = "auto",
-  includeSnippets: boolean = true
+  includeSnippets: boolean = true,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3127,7 +3759,12 @@ export async function mysqlRoutineImpact(
     const targetDatabase = database || process.env.MYSQL_DB;
     if (!targetDatabase) {
       return {
-        content: [{ type: "text", text: "Error: database is required when MYSQL_DB is not configured" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
         isError: true,
       };
     }
@@ -3141,23 +3778,26 @@ export async function mysqlRoutineImpact(
     }
 
     const versionInfo = await getDatabaseVersionInfo();
-    const resolvedType = routineType === "auto"
-      ? (
-          (await executeQuery<any[]>(
-            `SELECT ROUTINE_TYPE as routineType
+    const resolvedType =
+      routineType === "auto"
+        ? (
+            await executeQuery<any[]>(
+              `SELECT ROUTINE_TYPE as routineType
              FROM information_schema.ROUTINES
              WHERE ROUTINE_SCHEMA = ?
                AND ROUTINE_NAME = ?
              LIMIT 1`,
-            [targetDatabase, cleanRoutineName]
-          ))[0]?.routineType?.toLowerCase() || "auto"
-        )
-      : routineType;
+              [targetDatabase, cleanRoutineName],
+            )
+          )[0]?.routineType?.toLowerCase() || "auto"
+        : routineType;
 
     const patterns = buildRoutineUsagePatterns(
       cleanRoutineName,
       targetDatabase,
-      resolvedType === "procedure" || resolvedType === "function" ? resolvedType : "auto"
+      resolvedType === "procedure" || resolvedType === "function"
+        ? resolvedType
+        : "auto",
     );
 
     const allObjects: RoutineImpactObject[] = [];
@@ -3165,7 +3805,7 @@ export async function mysqlRoutineImpact(
       `SELECT ROUTINE_NAME as name, ROUTINE_TYPE as objectType
        FROM information_schema.ROUTINES
        WHERE ROUTINE_SCHEMA = ?`,
-      [targetDatabase]
+      [targetDatabase],
     );
     routines.forEach((item) => {
       allObjects.push({ objectType: item.objectType, name: item.name });
@@ -3175,109 +3815,144 @@ export async function mysqlRoutineImpact(
       `SELECT TABLE_NAME as name
        FROM information_schema.VIEWS
        WHERE TABLE_SCHEMA = ?`,
-      [targetDatabase]
+      [targetDatabase],
     );
-    views.forEach((item) => allObjects.push({ objectType: "VIEW", name: item.name }));
+    views.forEach((item) =>
+      allObjects.push({ objectType: "VIEW", name: item.name }),
+    );
 
     const triggers = await executeQuery<any[]>(
       `SELECT TRIGGER_NAME as name
        FROM information_schema.TRIGGERS
        WHERE TRIGGER_SCHEMA = ?`,
-      [targetDatabase]
+      [targetDatabase],
     );
-    triggers.forEach((item) => allObjects.push({ objectType: "TRIGGER", name: item.name }));
+    triggers.forEach((item) =>
+      allObjects.push({ objectType: "TRIGGER", name: item.name }),
+    );
 
     const events = await executeQuery<any[]>(
       `SELECT EVENT_NAME as name
        FROM information_schema.EVENTS
        WHERE EVENT_SCHEMA = ?`,
-      [targetDatabase]
+      [targetDatabase],
     );
-    events.forEach((item) => allObjects.push({ objectType: "EVENT", name: item.name }));
+    events.forEach((item) =>
+      allObjects.push({ objectType: "EVENT", name: item.name }),
+    );
 
-    const { candidates, prefilterSources, usedMysqlProc } = await getRoutineImpactCandidates(
-      targetDatabase,
-      cleanRoutineName,
-      versionInfo
-    );
+    const { candidates, prefilterSources, usedMysqlProc } =
+      await getRoutineImpactCandidates(
+        targetDatabase,
+        cleanRoutineName,
+        versionInfo,
+      );
 
     const shouldScanAllDefinitions = allObjects.length <= 250;
     const objectsToScan = shouldScanAllDefinitions
       ? allObjects
-      : (candidates.length > 0 ? candidates : allObjects);
+      : candidates.length > 0
+        ? candidates
+        : allObjects;
 
-    const findings = await mapWithConcurrency(objectsToScan, 4, async (object) => {
-      if (object.name === cleanRoutineName) {
-        return null;
-      }
-
-      const definition = await getRoutineDefinition(targetDatabase, object);
-      if (!definition) {
-        return null;
-      }
-
-      for (const pattern of patterns) {
-        const match = pattern.regex.exec(definition);
-        if (!match || match.index === undefined) {
-          continue;
+    const findings = await mapWithConcurrency(
+      objectsToScan,
+      4,
+      async (object) => {
+        if (object.name === cleanRoutineName) {
+          return null;
         }
 
-        return {
-          objectType: object.objectType,
-          name: object.name,
-          database: targetDatabase,
-          matchType: pattern.kind,
-          snippet: includeSnippets ? extractUsageSnippet(definition, match.index) : null,
-        };
-      }
+        const definition = await getRoutineDefinition(targetDatabase, object);
+        if (!definition) {
+          return null;
+        }
 
-      return null;
-    });
+        for (const pattern of patterns) {
+          const match = pattern.regex.exec(definition);
+          if (!match || match.index === undefined) {
+            continue;
+          }
+
+          return {
+            objectType: object.objectType,
+            name: object.name,
+            database: targetDatabase,
+            matchType: pattern.kind,
+            snippet: includeSnippets
+              ? extractUsageSnippet(definition, match.index)
+              : null,
+          };
+        }
+
+        return null;
+      },
+    );
 
     const references = findings
       .filter((item): item is NonNullable<typeof item> => item !== null)
-      .sort((left, right) =>
-        left.objectType.localeCompare(right.objectType) || left.name.localeCompare(right.name)
+      .sort(
+        (left, right) =>
+          left.objectType.localeCompare(right.objectType) ||
+          left.name.localeCompare(right.name),
       );
 
-    const summaryByType = references.reduce<Record<string, number>>((acc, item) => {
-      acc[item.objectType] = (acc[item.objectType] || 0) + 1;
-      return acc;
-    }, {});
+    const summaryByType = references.reduce<Record<string, number>>(
+      (acc, item) => {
+        acc[item.objectType] = (acc[item.objectType] || 0) + 1;
+        return acc;
+      },
+      {},
+    );
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          database: targetDatabase,
-          routineName: cleanRoutineName,
-          requestedRoutineType: routineType,
-          resolvedRoutineType: resolvedType,
-          versionInfo,
-          searchStrategy: {
-            prefilterSources,
-            usedMysqlProc,
-            verifiedWithShowCreate: true,
-            scannedObjects: objectsToScan.length,
-            totalObjectsInDatabase: allObjects.length,
-            scanMode: shouldScanAllDefinitions ? "full-definition-scan" : "prefilter-then-verify",
-          },
-          summary: {
-            totalReferences: references.length,
-            byObjectType: summaryByType,
-          },
-          references,
-          warnings: shouldScanAllDefinitions
-            ? []
-            : ["La base tiene muchos objetos. Se uso prefiltrado por metadata y verificacion con SHOW CREATE para reducir tiempo de respuesta."],
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              routineName: cleanRoutineName,
+              requestedRoutineType: routineType,
+              resolvedRoutineType: resolvedType,
+              versionInfo,
+              searchStrategy: {
+                prefilterSources,
+                usedMysqlProc,
+                verifiedWithShowCreate: true,
+                scannedObjects: objectsToScan.length,
+                totalObjectsInDatabase: allObjects.length,
+                scanMode: shouldScanAllDefinitions
+                  ? "full-definition-scan"
+                  : "prefilter-then-verify",
+              },
+              summary: {
+                totalReferences: references.length,
+                byObjectType: summaryByType,
+              },
+              references,
+              warnings: shouldScanAllDefinitions
+                ? []
+                : [
+                    "La base tiene muchos objetos. Se uso prefiltrado por metadata y verificacion con SHOW CREATE para reducir tiempo de respuesta.",
+                  ],
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_routine_impact:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3292,7 +3967,7 @@ export async function mysqlVariables(
   scope: "global" | "session" = "session",
   filter?: string,
   variable?: string,
-  value?: string
+  value?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3301,7 +3976,12 @@ export async function mysqlVariables(
     if (action === "set") {
       if (!variable || value === undefined) {
         return {
-          content: [{ type: "text", text: "Error: Variable name and value are required for SET action" }],
+          content: [
+            {
+              type: "text",
+              text: "Error: Variable name and value are required for SET action",
+            },
+          ],
           isError: true,
         };
       }
@@ -3309,7 +3989,12 @@ export async function mysqlVariables(
       // Validate variable name to prevent SQL injection (only alphanumeric, underscore, dot)
       if (!/^[a-zA-Z0-9_.]+$/.test(variable)) {
         return {
-          content: [{ type: "text", text: "Error: Invalid variable name. Only alphanumeric characters, underscore, and dot are allowed." }],
+          content: [
+            {
+              type: "text",
+              text: "Error: Invalid variable name. Only alphanumeric characters, underscore, and dot are allowed.",
+            },
+          ],
           isError: true,
         };
       }
@@ -3319,7 +4004,12 @@ export async function mysqlVariables(
       await executeQuery(sql, [value]);
 
       return {
-        content: [{ type: "text", text: `Successfully set ${scope} variable '${variable}' to '${value}'` }],
+        content: [
+          {
+            type: "text",
+            text: `Successfully set ${scope} variable '${variable}' to '${value}'`,
+          },
+        ],
         isError: false,
       };
     } else {
@@ -3348,22 +4038,33 @@ export async function mysqlVariables(
       }
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            scope,
-            totalVariables: variables.length,
-            filter: filter || "none",
-            variables: filter ? variables : grouped,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                scope,
+                totalVariables: variables.length,
+                filter: filter || "none",
+                variables: filter ? variables : grouped,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
         isError: false,
       };
     }
   } catch (error) {
     log("error", "Error in mysql_variables:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3373,9 +4074,7 @@ export async function mysqlVariables(
 // TOOL: mysql_index_suggestions - Analyze and suggest indexes
 // ============================================================================
 
-export async function mysqlIndexSuggestions(
-  database?: string
-): Promise<{
+export async function mysqlIndexSuggestions(database?: string): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
@@ -3409,33 +4108,39 @@ export async function mysqlIndexSuggestions(
       const pkCheck = await executeQuery<any[]>(
         `SELECT COUNT(*) as hasPK FROM information_schema.TABLE_CONSTRAINTS 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`,
-        [table.db, table.name]
+        [table.db, table.name],
       );
 
       if (pkCheck[0]?.hasPK === 0) {
         tableSuggestions.issues.push("⚠️ Table has no PRIMARY KEY");
-        tableSuggestions.suggestions.push("Consider adding a PRIMARY KEY for better performance");
+        tableSuggestions.suggestions.push(
+          "Consider adding a PRIMARY KEY for better performance",
+        );
       }
 
       // Check for foreign key columns without indexes
       const fkColumns = await executeQuery<any[]>(
         `SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
-        [table.db, table.name]
+        [table.db, table.name],
       );
 
       // Get existing indexes
       const indexes = await executeQuery<any[]>(
         `SELECT COLUMN_NAME FROM information_schema.STATISTICS 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
-        [table.db, table.name]
+        [table.db, table.name],
       );
-      const indexedColumns = new Set(indexes.map(i => i.COLUMN_NAME));
+      const indexedColumns = new Set(indexes.map((i) => i.COLUMN_NAME));
 
       for (const fk of fkColumns) {
         if (!indexedColumns.has(fk.COLUMN_NAME)) {
-          tableSuggestions.issues.push(`⚠️ Foreign key column '${fk.COLUMN_NAME}' is not indexed`);
-          tableSuggestions.suggestions.push(`CREATE INDEX idx_${table.name}_${fk.COLUMN_NAME} ON \`${table.db}\`.\`${table.name}\`(\`${fk.COLUMN_NAME}\`);`);
+          tableSuggestions.issues.push(
+            `⚠️ Foreign key column '${fk.COLUMN_NAME}' is not indexed`,
+          );
+          tableSuggestions.suggestions.push(
+            `CREATE INDEX idx_${table.name}_${fk.COLUMN_NAME} ON \`${table.db}\`.\`${table.name}\`(\`${fk.COLUMN_NAME}\`);`,
+          );
         }
       }
 
@@ -3443,41 +4148,68 @@ export async function mysqlIndexSuggestions(
       const columns = await executeQuery<any[]>(
         `SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS 
          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
-        [table.db, table.name]
+        [table.db, table.name],
       );
 
-      const commonWherePatterns = ["_id", "status", "type", "created_at", "updated_at", "email", "username", "code"];
+      const commonWherePatterns = [
+        "_id",
+        "status",
+        "type",
+        "created_at",
+        "updated_at",
+        "email",
+        "username",
+        "code",
+      ];
       for (const col of columns) {
         const colLower = col.COLUMN_NAME.toLowerCase();
-        if (commonWherePatterns.some(p => colLower.endsWith(p) || colLower === p)) {
+        if (
+          commonWherePatterns.some(
+            (p) => colLower.endsWith(p) || colLower === p,
+          )
+        ) {
           if (!indexedColumns.has(col.COLUMN_NAME)) {
             tableSuggestions.suggestions.push(
-              `💡 Consider indexing '${col.COLUMN_NAME}' if used frequently in WHERE clauses`
+              `💡 Consider indexing '${col.COLUMN_NAME}' if used frequently in WHERE clauses`,
             );
           }
         }
       }
 
-      if (tableSuggestions.issues.length > 0 || tableSuggestions.suggestions.length > 0) {
+      if (
+        tableSuggestions.issues.length > 0 ||
+        tableSuggestions.suggestions.length > 0
+      ) {
         suggestions.push(tableSuggestions);
       }
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          analyzedTables: tables.length,
-          tablesWithSuggestions: suggestions.length,
-          suggestions,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              analyzedTables: tables.length,
+              tablesWithSuggestions: suggestions.length,
+              suggestions,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_index_suggestions:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3489,7 +4221,7 @@ export async function mysqlIndexSuggestions(
 
 export async function mysqlForeignKeys(
   database?: string,
-  table?: string
+  table?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3567,20 +4299,31 @@ export async function mysqlForeignKeys(
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          totalRelationships: relationships.length,
-          tables: Object.keys(graph).length,
-          relationships: Object.values(graph),
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              totalRelationships: relationships.length,
+              tables: Object.keys(graph).length,
+              relationships: Object.values(graph),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_foreign_keys:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3592,7 +4335,7 @@ export async function mysqlForeignKeys(
 
 export async function mysqlTableStats(
   database?: string,
-  table?: string
+  table?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3644,39 +4387,59 @@ export async function mysqlTableStats(
       return `${size.toFixed(2)} ${units[unitIndex]}`;
     };
 
-    const stats = tables.map(t => ({
+    const stats = tables.map((t) => ({
       ...t,
       dataSizeFormatted: formatSize(t.dataSize),
       indexSizeFormatted: formatSize(t.indexSize),
       freeSpaceFormatted: formatSize(t.freeSpace),
       totalSize: t.dataSize + t.indexSize,
       totalSizeFormatted: formatSize(t.dataSize + t.indexSize),
-      fragmentationPercent: t.dataSize > 0 ? ((t.freeSpace / t.dataSize) * 100).toFixed(2) + "%" : "0%",
+      fragmentationPercent:
+        t.dataSize > 0
+          ? ((t.freeSpace / t.dataSize) * 100).toFixed(2) + "%"
+          : "0%",
     }));
 
     // Calculate totals
     const totals = {
       totalTables: stats.length,
       totalRows: stats.reduce((sum, t) => sum + (t.estimatedRows || 0), 0),
-      totalDataSize: formatSize(stats.reduce((sum, t) => sum + (t.dataSize || 0), 0)),
-      totalIndexSize: formatSize(stats.reduce((sum, t) => sum + (t.indexSize || 0), 0)),
-      totalFreeSpace: formatSize(stats.reduce((sum, t) => sum + (t.freeSpace || 0), 0)),
+      totalDataSize: formatSize(
+        stats.reduce((sum, t) => sum + (t.dataSize || 0), 0),
+      ),
+      totalIndexSize: formatSize(
+        stats.reduce((sum, t) => sum + (t.indexSize || 0), 0),
+      ),
+      totalFreeSpace: formatSize(
+        stats.reduce((sum, t) => sum + (t.freeSpace || 0), 0),
+      ),
     };
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          summary: totals,
-          tables: stats,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              summary: totals,
+              tables: stats,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_table_stats:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3686,9 +4449,7 @@ export async function mysqlTableStats(
 // TOOL: mysql_process_list - Show running processes/queries
 // ============================================================================
 
-export async function mysqlProcessList(
-  full: boolean = false
-): Promise<{
+export async function mysqlProcessList(full: boolean = false): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
@@ -3699,9 +4460,10 @@ export async function mysqlProcessList(
     // Analyze processes
     const analysis = {
       totalProcesses: processes.length,
-      activeQueries: processes.filter(p => p.Command !== "Sleep").length,
-      sleepingConnections: processes.filter(p => p.Command === "Sleep").length,
-      longRunning: processes.filter(p => p.Time > 30),
+      activeQueries: processes.filter((p) => p.Command !== "Sleep").length,
+      sleepingConnections: processes.filter((p) => p.Command === "Sleep")
+        .length,
+      longRunning: processes.filter((p) => p.Time > 30),
       byUser: {} as Record<string, number>,
       byCommand: {} as Record<string, number>,
     };
@@ -3712,19 +4474,30 @@ export async function mysqlProcessList(
     }
 
     return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          analysis,
-          processes,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              analysis,
+              processes,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_process_list:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3734,9 +4507,7 @@ export async function mysqlProcessList(
 // TOOL: mysql_kill_process - Kill a running process
 // ============================================================================
 
-export async function mysqlKillProcess(
-  processId: number
-): Promise<{
+export async function mysqlKillProcess(processId: number): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
@@ -3744,21 +4515,33 @@ export async function mysqlKillProcess(
     // Validate processId is a positive integer
     if (!Number.isInteger(processId) || processId <= 0) {
       return {
-        content: [{ type: "text", text: "Error: Process ID must be a positive integer" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: Process ID must be a positive integer",
+          },
+        ],
         isError: true,
       };
     }
-    
+
     // Use parameterized query for safety
     await executeQuery(`KILL ?`, [processId.toString()]);
     return {
-      content: [{ type: "text", text: `Successfully killed process ${processId}` }],
+      content: [
+        { type: "text", text: `Successfully killed process ${processId}` },
+      ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_kill_process:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3777,26 +4560,32 @@ export async function mysqlCreateProcedure(
     comment?: string;
     language?: "SQL";
     deterministic?: boolean;
-    containsSql?: "CONTAINS SQL" | "NO SQL" | "READS SQL DATA" | "MODIFIES SQL DATA";
+    containsSql?:
+      | "CONTAINS SQL"
+      | "NO SQL"
+      | "READS SQL DATA"
+      | "MODIFIES SQL DATA";
     sqlSecurity?: "DEFINER" | "INVOKER";
-  }
+  },
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const fullProcName = database ? `\`${database}\`.\`${procedureName}\`` : `\`${procedureName}\``;
-    
+    const fullProcName = database
+      ? `\`${database}\`.\`${procedureName}\``
+      : `\`${procedureName}\``;
+
     // Build CREATE PROCEDURE statement
     let createSql = `CREATE PROCEDURE ${fullProcName}`;
-    
+
     // Add parameters if provided
     if (parameters) {
       createSql += `(${parameters})`;
     } else {
       createSql += `()`;
     }
-    
+
     // Add characteristics
     if (characteristics) {
       const chars: string[] = [];
@@ -3804,7 +4593,9 @@ export async function mysqlCreateProcedure(
         chars.push(`LANGUAGE ${characteristics.language}`);
       }
       if (characteristics.deterministic !== undefined) {
-        chars.push(characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC");
+        chars.push(
+          characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC",
+        );
       }
       if (characteristics.containsSql) {
         chars.push(characteristics.containsSql);
@@ -3819,39 +4610,53 @@ export async function mysqlCreateProcedure(
         createSql += `\n${chars.join("\n")}`;
       }
     }
-    
+
     createSql += `\nBEGIN\n${procedureBody}\nEND`;
-    
+
     log("info", `Creating stored procedure: ${procedureName}`);
-    
+
     // CREATE PROCEDURE cannot run in transactions, so use direct connection
     const pool = await getPool();
     const connection = await pool.getConnection();
-    
+
     try {
       // Check if procedure exists (to provide better error message)
       try {
         const checkQuery = database
           ? `SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'`
           : `SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'`;
-        const checkParams = database ? [database, procedureName] : [procedureName];
+        const checkParams = database
+          ? [database, procedureName]
+          : [procedureName];
         const existing = await connection.query(checkQuery, checkParams);
-        if (Array.isArray(existing) && existing[0] && (existing[0] as any[]).length > 0) {
+        if (
+          Array.isArray(existing) &&
+          existing[0] &&
+          (existing[0] as any[]).length > 0
+        ) {
           return {
-            content: [{ type: "text", text: `Error: Procedure '${procedureName}' already exists. Use mysql_alter_procedure to modify it.` }],
+            content: [
+              {
+                type: "text",
+                text: `Error: Procedure '${procedureName}' already exists. Use mysql_alter_procedure to modify it.`,
+              },
+            ],
             isError: true,
           };
         }
       } catch {
         // Ignore check errors
       }
-      
+
       // Execute CREATE PROCEDURE
       await connection.query(createSql);
-      
+
       return {
         content: [
-          { type: "text", text: `Successfully created procedure '${procedureName}'` },
+          {
+            type: "text",
+            text: `Successfully created procedure '${procedureName}'`,
+          },
           { type: "text", text: `\nGenerated SQL:\n${createSql}` },
         ],
         isError: false,
@@ -3862,7 +4667,12 @@ export async function mysqlCreateProcedure(
   } catch (error) {
     log("error", "Error in mysql_create_procedure:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3881,33 +4691,41 @@ export async function mysqlAlterProcedure(
     comment?: string;
     language?: "SQL";
     deterministic?: boolean;
-    containsSql?: "CONTAINS SQL" | "NO SQL" | "READS SQL DATA" | "MODIFIES SQL DATA";
+    containsSql?:
+      | "CONTAINS SQL"
+      | "NO SQL"
+      | "READS SQL DATA"
+      | "MODIFIES SQL DATA";
     sqlSecurity?: "DEFINER" | "INVOKER";
   },
-  ifExists?: boolean
+  ifExists?: boolean,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const fullProcName = database ? `\`${database}\`.\`${procedureName}\`` : `\`${procedureName}\``;
-    
+    const fullProcName = database
+      ? `\`${database}\`.\`${procedureName}\``
+      : `\`${procedureName}\``;
+
     // Build CREATE PROCEDURE statement (same as create)
     let createSql = `CREATE PROCEDURE ${fullProcName}`;
-    
+
     if (parameters) {
       createSql += `(${parameters})`;
     } else {
       createSql += `()`;
     }
-    
+
     if (characteristics) {
       const chars: string[] = [];
       if (characteristics.language) {
         chars.push(`LANGUAGE ${characteristics.language}`);
       }
       if (characteristics.deterministic !== undefined) {
-        chars.push(characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC");
+        chars.push(
+          characteristics.deterministic ? "DETERMINISTIC" : "NOT DETERMINISTIC",
+        );
       }
       if (characteristics.containsSql) {
         chars.push(characteristics.containsSql);
@@ -3922,15 +4740,15 @@ export async function mysqlAlterProcedure(
         createSql += `\n${chars.join("\n")}`;
       }
     }
-    
+
     createSql += `\nBEGIN\n${procedureBody}\nEND`;
-    
+
     log("info", `Modifying stored procedure: ${procedureName}`);
-    
+
     // DROP and CREATE cannot run in transactions for procedures
     const pool = await getPool();
     const connection = await pool.getConnection();
-    
+
     try {
       // Drop existing procedure
       const dropSql = `DROP PROCEDURE ${ifExists ? "IF EXISTS" : ""} ${fullProcName}`;
@@ -3942,13 +4760,16 @@ export async function mysqlAlterProcedure(
         }
         // If IF EXISTS and procedure doesn't exist, continue
       }
-      
+
       // Create new procedure
       await connection.query(createSql);
-      
+
       return {
         content: [
-          { type: "text", text: `Successfully modified procedure '${procedureName}'` },
+          {
+            type: "text",
+            text: `Successfully modified procedure '${procedureName}'`,
+          },
           { type: "text", text: `\nGenerated SQL:\n${dropSql};\n${createSql}` },
         ],
         isError: false,
@@ -3959,7 +4780,12 @@ export async function mysqlAlterProcedure(
   } catch (error) {
     log("error", "Error in mysql_alter_procedure:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -3972,7 +4798,7 @@ export async function mysqlAlterProcedure(
 export async function mysqlAlterTable(
   table: string,
   alterStatement: string,
-  database?: string
+  database?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3980,36 +4806,54 @@ export async function mysqlAlterTable(
   try {
     if (!alterStatement || alterStatement.trim().length === 0) {
       return {
-        content: [{ type: "text", text: "Error: alterStatement is required and cannot be empty" }],
+        content: [
+          {
+            type: "text",
+            text: "Error: alterStatement is required and cannot be empty",
+          },
+        ],
         isError: true,
       };
     }
-    
-    const fullTableName = database ? `\`${database}\`.\`${table}\`` : `\`${table}\``;
+
+    const fullTableName = database
+      ? `\`${database}\`.\`${table}\``
+      : `\`${table}\``;
     const sql = `ALTER TABLE ${fullTableName} ${alterStatement}`;
-    
+
     log("info", `Executing ALTER TABLE: ${sql}`);
-    
+
     // Use executeReadOnlyQuery which will delegate to executeWriteQuery for DDL operations
     // This ensures proper permission checking
-    const result = await executeReadOnlyQuery<{ content: Array<{ type: string; text: string }>; isError: boolean }>(sql);
-    
+    const result = await executeReadOnlyQuery<{
+      content: Array<{ type: string; text: string }>;
+      isError: boolean;
+    }>(sql);
+
     if (result.isError) {
       return result;
     }
-    
+
     return {
       content: [
-        { type: "text", text: `Successfully executed ALTER TABLE on '${table}'` },
+        {
+          type: "text",
+          text: `Successfully executed ALTER TABLE on '${table}'`,
+        },
         { type: "text", text: `\nExecuted SQL: ${sql}` },
-        ...(result.content || [])
+        ...(result.content || []),
       ],
       isError: false,
     };
   } catch (error) {
     log("error", "Error in mysql_alter_table:", error);
     return {
-      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      content: [
+        {
+          type: "text",
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
       isError: true,
     };
   }
@@ -4022,15 +4866,21 @@ export async function mysqlAlterTable(
 export const additionalToolDefinitions = [
   {
     name: "mysql_explain",
-    description: "Analyze SQL query execution plan using EXPLAIN/EXPLAIN ANALYZE. Use this tool to optimize slow queries, understand how MySQL executes queries, and get automatic suggestions for adding indexes or improving query structure. Returns detailed execution plan with optimization recommendations. Works with SELECT, UPDATE, DELETE, and INSERT queries.",
+    description:
+      "Analyze SQL query execution plan using EXPLAIN/EXPLAIN ANALYZE. Use this tool to optimize slow queries, understand how MySQL executes queries, and get automatic suggestions for adding indexes or improving query structure. Returns detailed execution plan with optimization recommendations. Works with SELECT, UPDATE, DELETE, and INSERT queries.",
     inputSchema: {
       type: "object",
       properties: {
-        sql: { type: "string", description: "The SQL query to analyze (SELECT, UPDATE, DELETE, or INSERT)" },
-        format: { 
-          type: "string", 
+        sql: {
+          type: "string",
+          description:
+            "The SQL query to analyze (SELECT, UPDATE, DELETE, or INSERT)",
+        },
+        format: {
+          type: "string",
           enum: ["traditional", "json", "tree"],
-          description: "Output format: 'traditional' (default, human-readable table), 'json' (structured JSON), or 'tree' (hierarchical tree format)" 
+          description:
+            "Output format: 'traditional' (default, human-readable table), 'json' (structured JSON), or 'tree' (hierarchical tree format)",
         },
       },
       required: ["sql"],
@@ -4038,74 +4888,144 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_describe",
-    description: "Get comprehensive table structure information. Returns columns with data types, indexes, foreign key relationships, table statistics (row count, size, engine), and the CREATE TABLE statement. Use this tool when you need to understand a table's schema, check column types, see indexes, or analyze table structure before making changes.",
+    description:
+      "Get comprehensive table structure information. Returns columns with data types, indexes, foreign key relationships, table statistics (row count, size, engine), and the CREATE TABLE statement. Use this tool when you need to understand a table's schema, check column types, see indexes, or analyze table structure before making changes.",
     inputSchema: {
       type: "object",
       properties: {
         table: { type: "string", description: "Name of the table to describe" },
-        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
+        database: {
+          type: "string",
+          description:
+            "Database name (optional, uses current database if not specified)",
+        },
       },
       required: ["table"],
     },
   },
   {
     name: "mysql_data_dictionary",
-    description: "Generate AI-friendly documentation for one table or a full database. Returns per-table columns, primary key, foreign keys, indexes, sample rows, and an inferred purpose summary. Supports JSON or Markdown output so an agent can build context quickly before writing queries or code.",
+    description:
+      "Generate AI-friendly documentation for one table or a full database. Returns per-table columns, primary key, foreign keys, indexes, sample rows, and an inferred purpose summary. Supports JSON or Markdown output so an agent can build context quickly before writing queries or code.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to inspect. Optional if MYSQL_DB is configured." },
-        table: { type: "string", description: "Specific table to document. If omitted, documents all base tables in the database." },
-        format: { type: "string", enum: ["json", "markdown"], description: "Output format. Use 'json' for structured consumption or 'markdown' for readable documentation." },
-        sampleRowsLimit: { type: "number", description: "How many recent sample rows to include per table. Default: 3. Use 0 to disable samples." },
+        database: {
+          type: "string",
+          description:
+            "Database name to inspect. Optional if MYSQL_DB is configured.",
+        },
+        table: {
+          type: "string",
+          description:
+            "Specific table to document. If omitted, documents all base tables in the database.",
+        },
+        format: {
+          type: "string",
+          enum: ["json", "markdown"],
+          description:
+            "Output format. Use 'json' for structured consumption or 'markdown' for readable documentation.",
+        },
+        sampleRowsLimit: {
+          type: "number",
+          description:
+            "How many recent sample rows to include per table. Default: 3. Use 0 to disable samples.",
+        },
       },
     },
   },
   {
     name: "mysql_backup",
-    description: "Export table data to JSON or CSV format. Use this tool to backup data, export for analysis, or transfer data between systems. Supports filtering with WHERE clauses and limiting row count. Returns the exported data in the specified format.",
+    description:
+      "Export table data to JSON or CSV format. Use this tool to backup data, export for analysis, or transfer data between systems. Supports filtering with WHERE clauses and limiting row count. Returns the exported data in the specified format.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Name of the table to export data from" },
-        format: { type: "string", enum: ["json", "csv"], description: "Export format: 'json' (default, structured data) or 'csv' (comma-separated values for spreadsheets)" },
-        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
-        whereClause: { type: "string", description: "SQL WHERE clause conditions without the 'WHERE' keyword (e.g., 'status = \"active\" AND created_at > \"2024-01-01\"')" },
-        limit: { type: "number", description: "Maximum number of rows to export (useful for large tables)" },
+        table: {
+          type: "string",
+          description: "Name of the table to export data from",
+        },
+        format: {
+          type: "string",
+          enum: ["json", "csv"],
+          description:
+            "Export format: 'json' (default, structured data) or 'csv' (comma-separated values for spreadsheets)",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database name (optional, uses current database if not specified)",
+        },
+        whereClause: {
+          type: "string",
+          description:
+            "SQL WHERE clause conditions without the 'WHERE' keyword (e.g., 'status = \"active\" AND created_at > \"2024-01-01\"')",
+        },
+        limit: {
+          type: "number",
+          description:
+            "Maximum number of rows to export (useful for large tables)",
+        },
       },
       required: ["table"],
     },
   },
   {
     name: "mysql_export_schema",
-    description: "Exporta únicamente el esquema SQL a disco. Crea archivos .sql con CREATE/DROP/USE para tablas, views, procedures, functions, triggers y events. Usa este tool cuando el usuario pide 'generar/exportar el esquema', 'dump SQL', o archivos .sql. No genera documentación Markdown ni análisis con IA.",
+    description:
+      "Exporta únicamente el esquema SQL a disco. Crea archivos .sql con CREATE/DROP/USE para tablas, views, procedures, functions, triggers y events. Usa este tool cuando el usuario pide 'generar/exportar el esquema', 'dump SQL', o archivos .sql. No genera documentación Markdown ni análisis con IA.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to export. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Absolute or relative folder path where schema.sql and the subfolders procedures/, functions/, views/, triggers/, and events/ will be created. Optional if MYSQL_SCHEMA_EXPORT_DIR is configured." },
-        outputPath: { type: "string", description: "Backward-compatible alias of outputDir." },
-        includeDatabaseStatement: { type: "boolean", description: "If true, includes CREATE DATABASE and USE statements at the top of the file. Default: true." },
+        database: {
+          type: "string",
+          description:
+            "Database name to export. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Absolute or relative folder path where schema.sql and the subfolders procedures/, functions/, views/, triggers/, and events/ will be created. Optional if MYSQL_SCHEMA_EXPORT_DIR is configured.",
+        },
+        outputPath: {
+          type: "string",
+          description: "Backward-compatible alias of outputDir.",
+        },
+        includeDatabaseStatement: {
+          type: "boolean",
+          description:
+            "If true, includes CREATE DATABASE and USE statements at the top of the file. Default: true.",
+        },
       },
     },
   },
   {
     name: "mysql_import",
-    description: "Import data from a JSON array into a table. Use this tool to bulk insert data, restore backups, or sync data. Supports three modes: 'insert' (adds new rows), 'replace' (replaces existing rows with same primary key), and 'upsert' (inserts new or updates existing based on primary key). All operations run in a transaction for data integrity.",
+    description:
+      "Import data from a JSON array into a table. Use this tool to bulk insert data, restore backups, or sync data. Supports three modes: 'insert' (adds new rows), 'replace' (replaces existing rows with same primary key), and 'upsert' (inserts new or updates existing based on primary key). All operations run in a transaction for data integrity.",
     inputSchema: {
       type: "object",
       properties: {
-        table: { type: "string", description: "Target table name where data will be imported" },
+        table: {
+          type: "string",
+          description: "Target table name where data will be imported",
+        },
         data: {
           type: "array",
           items: { type: "object", additionalProperties: true },
-          description: "Array of objects to import. Each object should have keys matching table column names. Example: [{\"id\": 1, \"name\": \"John\"}, {\"id\": 2, \"name\": \"Jane\"}]",
+          description:
+            'Array of objects to import. Each object should have keys matching table column names. Example: [{"id": 1, "name": "John"}, {"id": 2, "name": "Jane"}]',
         },
-        database: { type: "string", description: "Database name (optional, uses current database if not specified)" },
-        mode: { 
-          type: "string", 
+        database: {
+          type: "string",
+          description:
+            "Database name (optional, uses current database if not specified)",
+        },
+        mode: {
+          type: "string",
           enum: ["insert", "replace", "upsert"],
-          description: "Import mode: 'insert' (default, adds new rows only), 'replace' (replaces existing rows with same primary/unique key), 'upsert' (inserts new rows or updates existing ones using ON DUPLICATE KEY UPDATE)" 
+          description:
+            "Import mode: 'insert' (default, adds new rows only), 'replace' (replaces existing rows with same primary/unique key), 'upsert' (inserts new rows or updates existing ones using ON DUPLICATE KEY UPDATE)",
         },
       },
       required: ["table", "data"],
@@ -4113,243 +5033,526 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_compare_schemas",
-    description: "Compare the structure (schema) between two databases and identify differences. Use this tool to find missing tables, different column definitions, or schema drift between environments (dev vs prod, staging vs production, etc.). Returns detailed comparison showing tables only in source, tables only in target, and column differences in common tables.",
+    description:
+      "Compare the structure (schema) between two databases and identify differences. Use this tool to find missing tables, different column definitions, or schema drift between environments (dev vs prod, staging vs production, etc.). Returns detailed comparison showing tables only in source, tables only in target, and column differences in common tables.",
     inputSchema: {
       type: "object",
       properties: {
-        sourceDb: { type: "string", description: "Source database name (the reference schema to compare FROM)" },
-        targetDb: { type: "string", description: "Target database name (the schema to compare TO)" },
+        sourceDb: {
+          type: "string",
+          description:
+            "Source database name (the reference schema to compare FROM)",
+        },
+        targetDb: {
+          type: "string",
+          description: "Target database name (the schema to compare TO)",
+        },
       },
       required: ["sourceDb", "targetDb"],
     },
   },
   {
     name: "mysql_generate_migration",
-    description: "Generate a SQL migration script to synchronize two database schemas. Use this after mysql_compare_schemas to create ALTER TABLE statements that will make the target database match the source. The generated script includes CREATE TABLE for missing tables, ALTER TABLE for column changes, and commented DROP statements for safety. Review the script carefully before executing.",
+    description:
+      "Generate a SQL migration script to synchronize two database schemas. Use this after mysql_compare_schemas to create ALTER TABLE statements that will make the target database match the source. The generated script includes CREATE TABLE for missing tables, ALTER TABLE for column changes, and commented DROP statements for safety. Review the script carefully before executing.",
     inputSchema: {
       type: "object",
       properties: {
-        sourceDb: { type: "string", description: "Source database name (the reference schema to migrate FROM - this is the desired state)" },
-        targetDb: { type: "string", description: "Target database name (the schema to migrate TO - this will be modified to match source)" },
+        sourceDb: {
+          type: "string",
+          description:
+            "Source database name (the reference schema to migrate FROM - this is the desired state)",
+        },
+        targetDb: {
+          type: "string",
+          description:
+            "Target database name (the schema to migrate TO - this will be modified to match source)",
+        },
       },
       required: ["sourceDb", "targetDb"],
     },
   },
   {
     name: "mysql_query_history",
-    description: "View or clear the history of executed queries in the current session. Use this tool to review what queries have been run, check execution times, see which queries failed, or debug issues. The history includes SQL statements, execution duration, row counts, and success/failure status. History is stored in-memory and cleared when the session ends.",
+    description:
+      "View or clear the history of executed queries in the current session. Use this tool to review what queries have been run, check execution times, see which queries failed, or debug issues. The history includes SQL statements, execution duration, row counts, and success/failure status. History is stored in-memory and cleared when the session ends.",
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "number", description: "Number of most recent queries to return (default: 50, maximum: 100)" },
-        clear: { type: "boolean", description: "If true, clears the entire query history instead of returning it" },
+        limit: {
+          type: "number",
+          description:
+            "Number of most recent queries to return (default: 50, maximum: 100)",
+        },
+        clear: {
+          type: "boolean",
+          description:
+            "If true, clears the entire query history instead of returning it",
+        },
       },
     },
   },
   {
     name: "mysql_call_procedure",
-    description: "Execute a MySQL stored procedure using the CALL statement. Use this tool to run stored procedures that encapsulate business logic, perform complex operations, or return result sets. Parameters are passed as an array in the order defined by the procedure. Returns the procedure's result set or output parameters.",
+    description:
+      "Execute a MySQL stored procedure using the CALL statement. Use this tool to run stored procedures that encapsulate business logic, perform complex operations, or return result sets. Parameters are passed as an array in the order defined by the procedure. Returns the procedure's result set or output parameters.",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the stored procedure to execute" },
+        procedureName: {
+          type: "string",
+          description: "Name of the stored procedure to execute",
+        },
         params: {
           type: "array",
           items: {},
-          description: "Array of parameter values in the order defined by the procedure. Can contain strings, numbers, booleans, or null. Example: [\"value1\", 123, true]",
+          description:
+            'Array of parameter values in the order defined by the procedure. Can contain strings, numbers, booleans, or null. Example: ["value1", 123, true]',
         },
-        database: { type: "string", description: "Database name where the procedure exists (optional, uses current database if not specified)" },
+        database: {
+          type: "string",
+          description:
+            "Database name where the procedure exists (optional, uses current database if not specified)",
+        },
       },
       required: ["procedureName"],
     },
   },
   {
     name: "mysql_document_procedure",
-    description: "Documenta un solo stored procedure en Markdown y lo guarda en disco. Usa este tool cuando el usuario pide 'documenta este SP' o quiere entender una rutina puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
+    description:
+      "Documenta un solo stored procedure en Markdown y lo guarda en disco. Usa este tool cuando el usuario pide 'documenta este SP' o quiere entender una rutina puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Stored procedure name to document." },
-        database: { type: "string", description: "Database where the procedure exists. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
-        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE PROCEDURE SQL in the generated Markdown. Default: true." },
-        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown using MYSQL_AI_DOCS_OPENAI_API_KEY/OPENAI_API_KEY, MYSQL_AI_DOCS_OPENAI_MODEL, and MYSQL_AI_DOCS_TEMPLATE_PATH. Default: false." },
+        procedureName: {
+          type: "string",
+          description: "Stored procedure name to document.",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database where the procedure exists. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes the CREATE PROCEDURE SQL in the generated Markdown. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI to rewrite and enrich the final Markdown using MYSQL_AI_DOCS_OPENAI_API_KEY/OPENAI_API_KEY, MYSQL_AI_DOCS_OPENAI_MODEL, and MYSQL_AI_DOCS_TEMPLATE_PATH. Default: false.",
+        },
       },
       required: ["procedureName"],
     },
   },
   {
     name: "mysql_document_function",
-    description: "Documenta una sola function de MySQL en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta función' o quiere entender una function puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
+    description:
+      "Documenta una sola function de MySQL en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta función', 'explica esta function' o quiere entender una function puntual. No exporta todas las functions de la base ni el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
-        functionName: { type: "string", description: "Function name to document." },
-        database: { type: "string", description: "Database where the function exists. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
-        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE FUNCTION SQL in the generated Markdown. Default: true." },
-        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false." },
+        functionName: {
+          type: "string",
+          description: "Function name to document.",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database where the function exists. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes the CREATE FUNCTION SQL in the generated Markdown. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false.",
+        },
       },
       required: ["functionName"],
     },
   },
   {
     name: "mysql_document_view",
-    description: "Documenta una sola view en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta vista' o quiere entender una view puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
+    description:
+      "Documenta una sola view en Markdown y la guarda en disco. Usa este tool cuando el usuario pide 'documenta esta vista' o quiere entender una view puntual. No exporta el esquema SQL completo. Si documentWithAi=true, usa OpenAI para enriquecer el documento final.",
     inputSchema: {
       type: "object",
       properties: {
         viewName: { type: "string", description: "View name to document." },
-        database: { type: "string", description: "Database where the view exists. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
-        includeSourceSql: { type: "boolean", description: "If true, includes the CREATE VIEW SQL in the generated Markdown. Default: true." },
-        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false." },
+        database: {
+          type: "string",
+          description:
+            "Database where the view exists. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes the CREATE VIEW SQL in the generated Markdown. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI to rewrite and enrich the final Markdown. Default: false.",
+        },
       },
       required: ["viewName"],
     },
   },
   {
     name: "mysql_export_procedure_docs",
-    description: "Genera documentación Markdown de todos los stored procedures de la base y la guarda en carpeta. Usa este tool cuando el usuario pide 'documenta todos los SP' o quiere una carpeta completa de documentación de procedures. No exporta el esquema SQL raw. Si documentWithAi=true, cada archivo se enriquece con OpenAI.",
+    description:
+      "Genera documentación Markdown de todos los stored procedures de la base y la guarda en carpeta. Usa este tool cuando el usuario pide 'documenta todos los SP' o quiere una carpeta completa de documentación de procedures. No exporta el esquema SQL raw. Si documentWithAi=true, cada archivo se enriquece con OpenAI.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to document. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
-        includeSourceSql: { type: "boolean", description: "If true, includes source SQL in each generated procedure Markdown. Default: true." },
-        documentWithAi: { type: "boolean", description: "If true, uses OpenAI for each stored procedure Markdown file. Default: false." },
+        database: {
+          type: "string",
+          description:
+            "Database name to document. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes source SQL in each generated procedure Markdown. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI for each stored procedure Markdown file. Default: false.",
+        },
+      },
+    },
+  },
+  {
+    name: "mysql_export_function_docs",
+    description:
+      "Genera documentación Markdown de todas las functions de la base y la guarda en carpeta. Usa este tool cuando el usuario pide 'exporta la documentación de mis funciones', 'documenta todas mis functions en md', o quiere una carpeta completa de documentación de functions. No exporta stored procedures ni el esquema SQL raw. Si documentWithAi=true, cada archivo se enriquece con OpenAI; si no, genera Markdown base con versión de DB y SQL fuente opcional.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: {
+          type: "string",
+          description:
+            "Database name to document. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes source SQL in each generated function Markdown. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI for each function Markdown file. Default: false.",
+        },
       },
     },
   },
   {
     name: "mysql_generate_ai_docs",
-    description: "Genera documentación funcional completa en Markdown para la base: data dictionary, procedures, functions y views. Usa este tool cuando el usuario pide 'documenta toda la base', 'genera docs', o quiere contexto funcional para humanos o IA. No es un export de esquema SQL. Si el usuario pide archivos .sql o dump estructural, usa mysql_export_schema en lugar de este tool.",
+    description:
+      "Genera documentación funcional completa en Markdown para la base: data dictionary, procedures, functions y views. Usa este tool cuando el usuario pide 'documenta toda la base', 'genera docs completas', o quiere contexto funcional global para humanos o IA. No es un export específico de solo functions ni un export de esquema SQL. Si el usuario pide solo functions en md, usa mysql_export_function_docs. Si pide archivos .sql, usa mysql_export_schema.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to document. Optional if MYSQL_DB is configured." },
-        outputDir: { type: "string", description: "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs." },
-        includeSourceSql: { type: "boolean", description: "If true, includes source SQL in generated Markdown files. Default: true." },
-        includeDataDictionary: { type: "boolean", description: "If true, generates data-dictionary.md before documenting routines and views. Default: true." },
-        documentWithAi: { type: "boolean", description: "If true, uses OpenAI to enrich the generated Markdown files. Default: false." },
+        database: {
+          type: "string",
+          description:
+            "Database name to document. Optional if MYSQL_DB is configured.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Base output directory. Defaults to MYSQL_AI_DOCS_DIR or ./docs.",
+        },
+        includeSourceSql: {
+          type: "boolean",
+          description:
+            "If true, includes source SQL in generated Markdown files. Default: true.",
+        },
+        includeDataDictionary: {
+          type: "boolean",
+          description:
+            "If true, generates data-dictionary.md before documenting routines and views. Default: true.",
+        },
+        documentWithAi: {
+          type: "boolean",
+          description:
+            "If true, uses OpenAI to enrich the generated Markdown files. Default: false.",
+        },
       },
     },
   },
   {
     name: "mysql_show_views",
-    description: "List all database views or get detailed information about a specific view. Use this tool to discover available views, understand view definitions, check if views are updatable, or see view metadata. Views are virtual tables based on SELECT queries. If viewName is provided, returns detailed view structure including columns and definition.",
+    description:
+      "List all database views or get detailed information about a specific view. Use this tool to discover available views, understand view definitions, check if views are updatable, or see view metadata. Views are virtual tables based on SELECT queries. If viewName is provided, returns detailed view structure including columns and definition.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to search views in (optional, searches all databases if not specified)" },
-        viewName: { type: "string", description: "Specific view name to get detailed information for (optional, if omitted returns list of all views)" },
+        database: {
+          type: "string",
+          description:
+            "Database name to search views in (optional, searches all databases if not specified)",
+        },
+        viewName: {
+          type: "string",
+          description:
+            "Specific view name to get detailed information for (optional, if omitted returns list of all views)",
+        },
       },
     },
   },
   {
     name: "mysql_routine_impact",
-    description: "Analiza impacto de cambio de una stored procedure o function. Busca dónde se usa dentro de procedures, functions, views, triggers y events para saber qué podría romperse si cambias esa rutina. Usa este tool cuando el usuario pregunta 'dónde se usa', 'qué impacta', o 'quién llama a esta function/SP'.",
+    description:
+      "Analiza impacto de cambio de una stored procedure o function. Busca dónde se usa dentro de procedures, functions, views, triggers y events para saber qué podría romperse si cambias esa rutina. Usa este tool cuando el usuario pregunta 'dónde se usa', 'qué impacta', o 'quién llama a esta function/SP'.",
     inputSchema: {
       type: "object",
       properties: {
-        routineName: { type: "string", description: "Nombre de la function o stored procedure a buscar." },
-        database: { type: "string", description: "Base de datos donde buscar dependencias. Opcional si MYSQL_DB está configurado." },
-        routineType: { type: "string", enum: ["auto", "procedure", "function"], description: "Tipo de routine buscada. Usa 'auto' para inferirlo. Default: auto." },
-        includeSnippets: { type: "boolean", description: "Si es true, incluye un snippet corto donde se detectó el uso. Default: true." },
+        routineName: {
+          type: "string",
+          description: "Nombre de la function o stored procedure a buscar.",
+        },
+        database: {
+          type: "string",
+          description:
+            "Base de datos donde buscar dependencias. Opcional si MYSQL_DB está configurado.",
+        },
+        routineType: {
+          type: "string",
+          enum: ["auto", "procedure", "function"],
+          description:
+            "Tipo de routine buscada. Usa 'auto' para inferirlo. Default: auto.",
+        },
+        includeSnippets: {
+          type: "boolean",
+          description:
+            "Si es true, incluye un snippet corto donde se detectó el uso. Default: true.",
+        },
       },
       required: ["routineName"],
     },
   },
   {
     name: "mysql_variables",
-    description: "Show or set MySQL server configuration variables. Use this tool to check current MySQL settings (like max_connections, innodb_buffer_pool_size, etc.) or modify session/global variables. 'session' variables affect only the current connection, 'global' variables affect all new connections. Use 'filter' to search for specific variables by name pattern.",
+    description:
+      "Show or set MySQL server configuration variables. Use this tool to check current MySQL settings (like max_connections, innodb_buffer_pool_size, etc.) or modify session/global variables. 'session' variables affect only the current connection, 'global' variables affect all new connections. Use 'filter' to search for specific variables by name pattern.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["show", "set"], description: "Action to perform: 'show' (default, displays variables) or 'set' (modifies a variable value)" },
-        scope: { type: "string", enum: ["global", "session"], description: "Variable scope: 'session' (default, affects current connection only) or 'global' (affects all new connections, requires SUPER privilege)" },
-        filter: { type: "string", description: "Filter variables by name pattern (e.g., 'max_conn' to find max_connections, max_connect_errors, etc.)" },
-        variable: { type: "string", description: "Variable name to set (required when action='set', e.g., 'max_connections', 'innodb_buffer_pool_size')" },
-        value: { type: "string", description: "New value for the variable (required when action='set', must be a valid value for that variable type)" },
+        action: {
+          type: "string",
+          enum: ["show", "set"],
+          description:
+            "Action to perform: 'show' (default, displays variables) or 'set' (modifies a variable value)",
+        },
+        scope: {
+          type: "string",
+          enum: ["global", "session"],
+          description:
+            "Variable scope: 'session' (default, affects current connection only) or 'global' (affects all new connections, requires SUPER privilege)",
+        },
+        filter: {
+          type: "string",
+          description:
+            "Filter variables by name pattern (e.g., 'max_conn' to find max_connections, max_connect_errors, etc.)",
+        },
+        variable: {
+          type: "string",
+          description:
+            "Variable name to set (required when action='set', e.g., 'max_connections', 'innodb_buffer_pool_size')",
+        },
+        value: {
+          type: "string",
+          description:
+            "New value for the variable (required when action='set', must be a valid value for that variable type)",
+        },
       },
     },
   },
   {
     name: "mysql_index_suggestions",
-    description: "Analyze database tables and automatically suggest missing indexes for query optimization. Use this tool to identify performance issues like tables without primary keys, foreign key columns without indexes, or commonly queried columns that should be indexed. Returns actionable suggestions with CREATE INDEX statements ready to execute.",
+    description:
+      "Analyze database tables and automatically suggest missing indexes for query optimization. Use this tool to identify performance issues like tables without primary keys, foreign key columns without indexes, or commonly queried columns that should be indexed. Returns actionable suggestions with CREATE INDEX statements ready to execute.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to analyze (optional, analyzes all databases if not specified)" },
+        database: {
+          type: "string",
+          description:
+            "Database name to analyze (optional, analyzes all databases if not specified)",
+        },
       },
     },
   },
   {
     name: "mysql_foreign_keys",
-    description: "Show foreign key relationships between tables. Use this tool to understand database relationships, see which tables reference each other, check referential integrity constraints, or map out the database schema structure. Returns a relationship graph showing which tables reference others and which are referenced by others, including ON UPDATE and ON DELETE rules.",
+    description:
+      "Show foreign key relationships between tables. Use this tool to understand database relationships, see which tables reference each other, check referential integrity constraints, or map out the database schema structure. Returns a relationship graph showing which tables reference others and which are referenced by others, including ON UPDATE and ON DELETE rules.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to search in (optional, searches all databases if not specified)" },
-        table: { type: "string", description: "Specific table name to show relationships for (optional, if omitted shows all foreign key relationships)" },
+        database: {
+          type: "string",
+          description:
+            "Database name to search in (optional, searches all databases if not specified)",
+        },
+        table: {
+          type: "string",
+          description:
+            "Specific table name to show relationships for (optional, if omitted shows all foreign key relationships)",
+        },
       },
     },
   },
   {
     name: "mysql_table_stats",
-    description: "Get detailed statistics and metrics for database tables. Use this tool to monitor table sizes, row counts, fragmentation levels, storage engine information, and identify tables that may need optimization or maintenance. Returns formatted sizes (KB, MB, GB), fragmentation percentages, and summary totals. Useful for capacity planning and performance monitoring.",
+    description:
+      "Get detailed statistics and metrics for database tables. Use this tool to monitor table sizes, row counts, fragmentation levels, storage engine information, and identify tables that may need optimization or maintenance. Returns formatted sizes (KB, MB, GB), fragmentation percentages, and summary totals. Useful for capacity planning and performance monitoring.",
     inputSchema: {
       type: "object",
       properties: {
-        database: { type: "string", description: "Database name to analyze (optional, analyzes all databases if not specified)" },
-        table: { type: "string", description: "Specific table name to get statistics for (optional, if omitted returns stats for all tables)" },
+        database: {
+          type: "string",
+          description:
+            "Database name to analyze (optional, analyzes all databases if not specified)",
+        },
+        table: {
+          type: "string",
+          description:
+            "Specific table name to get statistics for (optional, if omitted returns stats for all tables)",
+        },
       },
     },
   },
   {
     name: "mysql_process_list",
-    description: "Show currently running MySQL processes and active queries. Use this tool to monitor database activity, identify long-running queries, see which users are connected, check query execution times, or diagnose performance issues. Returns process list with analysis including active queries count, sleeping connections, and queries grouped by user/command.",
+    description:
+      "Show currently running MySQL processes and active queries. Use this tool to monitor database activity, identify long-running queries, see which users are connected, check query execution times, or diagnose performance issues. Returns process list with analysis including active queries count, sleeping connections, and queries grouped by user/command.",
     inputSchema: {
       type: "object",
       properties: {
-        full: { type: "boolean", description: "If true, shows full query text (default: false, shows truncated queries for readability)" },
+        full: {
+          type: "boolean",
+          description:
+            "If true, shows full query text (default: false, shows truncated queries for readability)",
+        },
       },
     },
   },
   {
     name: "mysql_kill_process",
-    description: "Terminate a running MySQL process/query by its process ID. Use this tool to stop long-running queries, kill stuck connections, or free up resources. First use mysql_process_list to find the process ID, then use this tool to kill it. WARNING: This will immediately terminate the query/connection.",
+    description:
+      "Terminate a running MySQL process/query by its process ID. Use this tool to stop long-running queries, kill stuck connections, or free up resources. First use mysql_process_list to find the process ID, then use this tool to kill it. WARNING: This will immediately terminate the query/connection.",
     inputSchema: {
       type: "object",
       properties: {
-        processId: { type: "number", description: "Process ID to kill (get this from mysql_process_list output, must be a positive integer)" },
+        processId: {
+          type: "number",
+          description:
+            "Process ID to kill (get this from mysql_process_list output, must be a positive integer)",
+        },
       },
       required: ["processId"],
     },
   },
   {
     name: "mysql_create_procedure",
-    description: "Create a new MySQL stored procedure. Use this tool to encapsulate business logic, create reusable database functions, or implement complex operations. Stored procedures can accept IN/OUT/INOUT parameters and return result sets. The procedure body contains SQL statements wrapped in BEGIN...END. Returns an error if the procedure already exists (use mysql_alter_procedure to modify existing procedures).",
+    description:
+      "Create a new MySQL stored procedure. Use this tool to encapsulate business logic, create reusable database functions, or implement complex operations. Stored procedures can accept IN/OUT/INOUT parameters and return result sets. The procedure body contains SQL statements wrapped in BEGIN...END. Returns an error if the procedure already exists (use mysql_alter_procedure to modify existing procedures).",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the procedure to create (must be unique in the database)" },
-        procedureBody: { type: "string", description: "SQL statements inside BEGIN...END block. Example: 'SELECT * FROM users WHERE id = user_id; SELECT COUNT(*) INTO total FROM orders;'" },
-        database: { type: "string", description: "Database name where to create the procedure (optional, uses current database if not specified)" },
-        parameters: { type: "string", description: "Procedure parameters definition. Example: 'IN user_id INT, OUT total INT, INOUT counter INT'. Use IN for input, OUT for output, INOUT for both." },
+        procedureName: {
+          type: "string",
+          description:
+            "Name of the procedure to create (must be unique in the database)",
+        },
+        procedureBody: {
+          type: "string",
+          description:
+            "SQL statements inside BEGIN...END block. Example: 'SELECT * FROM users WHERE id = user_id; SELECT COUNT(*) INTO total FROM orders;'",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database name where to create the procedure (optional, uses current database if not specified)",
+        },
+        parameters: {
+          type: "string",
+          description:
+            "Procedure parameters definition. Example: 'IN user_id INT, OUT total INT, INOUT counter INT'. Use IN for input, OUT for output, INOUT for both.",
+        },
         characteristics: {
           type: "object",
-          description: "Optional procedure characteristics for security and optimization",
+          description:
+            "Optional procedure characteristics for security and optimization",
           properties: {
-            comment: { type: "string", description: "Documentation comment describing what the procedure does" },
-            language: { type: "string", enum: ["SQL"], description: "Programming language (default: SQL)" },
-            deterministic: { type: "boolean", description: "Whether the procedure always returns the same result for the same inputs (affects caching)" },
+            comment: {
+              type: "string",
+              description:
+                "Documentation comment describing what the procedure does",
+            },
+            language: {
+              type: "string",
+              enum: ["SQL"],
+              description: "Programming language (default: SQL)",
+            },
+            deterministic: {
+              type: "boolean",
+              description:
+                "Whether the procedure always returns the same result for the same inputs (affects caching)",
+            },
             containsSql: {
               type: "string",
-              enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
-              description: "SQL data access level: 'CONTAINS SQL' (default, may read/write), 'NO SQL' (no SQL), 'READS SQL DATA' (read-only), 'MODIFIES SQL DATA' (may modify data)"
+              enum: [
+                "CONTAINS SQL",
+                "NO SQL",
+                "READS SQL DATA",
+                "MODIFIES SQL DATA",
+              ],
+              description:
+                "SQL data access level: 'CONTAINS SQL' (default, may read/write), 'NO SQL' (no SQL), 'READS SQL DATA' (read-only), 'MODIFIES SQL DATA' (may modify data)",
             },
-            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "Security context: 'DEFINER' (runs with creator's privileges) or 'INVOKER' (runs with caller's privileges)" },
+            sqlSecurity: {
+              type: "string",
+              enum: ["DEFINER", "INVOKER"],
+              description:
+                "Security context: 'DEFINER' (runs with creator's privileges) or 'INVOKER' (runs with caller's privileges)",
+            },
           },
         },
       },
@@ -4358,43 +5561,90 @@ export const additionalToolDefinitions = [
   },
   {
     name: "mysql_alter_procedure",
-    description: "Modify an existing stored procedure by dropping and recreating it. Use this tool to update procedure logic, change parameters, or modify characteristics. MySQL doesn't support ALTER PROCEDURE directly, so this tool performs DROP + CREATE. Set ifExists=true to avoid errors if the procedure doesn't exist. WARNING: This will temporarily remove the procedure during recreation.",
+    description:
+      "Modify an existing stored procedure by dropping and recreating it. Use this tool to update procedure logic, change parameters, or modify characteristics. MySQL doesn't support ALTER PROCEDURE directly, so this tool performs DROP + CREATE. Set ifExists=true to avoid errors if the procedure doesn't exist. WARNING: This will temporarily remove the procedure during recreation.",
     inputSchema: {
       type: "object",
       properties: {
-        procedureName: { type: "string", description: "Name of the existing procedure to modify" },
-        procedureBody: { type: "string", description: "Updated SQL statements inside BEGIN...END block" },
-        database: { type: "string", description: "Database name where the procedure exists (optional, uses current database if not specified)" },
-        parameters: { type: "string", description: "Updated procedure parameters. Example: 'IN param1 INT, OUT param2 VARCHAR(100)'. Can be different from original." },
+        procedureName: {
+          type: "string",
+          description: "Name of the existing procedure to modify",
+        },
+        procedureBody: {
+          type: "string",
+          description: "Updated SQL statements inside BEGIN...END block",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database name where the procedure exists (optional, uses current database if not specified)",
+        },
+        parameters: {
+          type: "string",
+          description:
+            "Updated procedure parameters. Example: 'IN param1 INT, OUT param2 VARCHAR(100)'. Can be different from original.",
+        },
         characteristics: {
           type: "object",
           description: "Updated procedure characteristics",
           properties: {
-            comment: { type: "string", description: "Updated documentation comment" },
-            language: { type: "string", enum: ["SQL"], description: "Programming language (default: SQL)" },
-            deterministic: { type: "boolean", description: "Updated determinism setting" },
+            comment: {
+              type: "string",
+              description: "Updated documentation comment",
+            },
+            language: {
+              type: "string",
+              enum: ["SQL"],
+              description: "Programming language (default: SQL)",
+            },
+            deterministic: {
+              type: "boolean",
+              description: "Updated determinism setting",
+            },
             containsSql: {
               type: "string",
-              enum: ["CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA"],
-              description: "Updated SQL data access level"
+              enum: [
+                "CONTAINS SQL",
+                "NO SQL",
+                "READS SQL DATA",
+                "MODIFIES SQL DATA",
+              ],
+              description: "Updated SQL data access level",
             },
-            sqlSecurity: { type: "string", enum: ["DEFINER", "INVOKER"], description: "Updated security context" },
+            sqlSecurity: {
+              type: "string",
+              enum: ["DEFINER", "INVOKER"],
+              description: "Updated security context",
+            },
           },
         },
-        ifExists: { type: "boolean", description: "If true, uses 'DROP PROCEDURE IF EXISTS' to avoid errors if procedure doesn't exist (default: false)" },
+        ifExists: {
+          type: "boolean",
+          description:
+            "If true, uses 'DROP PROCEDURE IF EXISTS' to avoid errors if procedure doesn't exist (default: false)",
+        },
       },
       required: ["procedureName", "procedureBody"],
     },
   },
   {
     name: "mysql_alter_table",
-    description: "Execute ALTER TABLE operations to modify table structure. Use this tool to add/modify/drop columns, add/remove indexes, change data types, modify constraints, or rename tables. Supports all MySQL ALTER TABLE operations. The alterStatement should contain the operation without the 'ALTER TABLE table_name' prefix. Returns the executed SQL for verification.",
+    description:
+      "Execute ALTER TABLE operations to modify table structure. Use this tool to add/modify/drop columns, add/remove indexes, change data types, modify constraints, or rename tables. Supports all MySQL ALTER TABLE operations. The alterStatement should contain the operation without the 'ALTER TABLE table_name' prefix. Returns the executed SQL for verification.",
     inputSchema: {
       type: "object",
       properties: {
         table: { type: "string", description: "Name of the table to modify" },
-        alterStatement: { type: "string", description: "ALTER TABLE operation statement (without 'ALTER TABLE table_name' prefix). Examples: 'ADD COLUMN name VARCHAR(100) NOT NULL', 'MODIFY COLUMN id INT AUTO_INCREMENT', 'DROP COLUMN old_column', 'ADD INDEX idx_name (name)', 'ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)', 'RENAME TO new_table_name'" },
-        database: { type: "string", description: "Database name where the table exists (optional, uses current database if not specified)" },
+        alterStatement: {
+          type: "string",
+          description:
+            "ALTER TABLE operation statement (without 'ALTER TABLE table_name' prefix). Examples: 'ADD COLUMN name VARCHAR(100) NOT NULL', 'MODIFY COLUMN id INT AUTO_INCREMENT', 'DROP COLUMN old_column', 'ADD INDEX idx_name (name)', 'ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)', 'RENAME TO new_table_name'",
+        },
+        database: {
+          type: "string",
+          description:
+            "Database name where the table exists (optional, uses current database if not specified)",
+        },
       },
       required: ["table", "alterStatement"],
     },
@@ -4404,12 +5654,15 @@ export const additionalToolDefinitions = [
 // Handler function to route tool calls
 export async function handleAdditionalTool(
   toolName: string,
-  args: Record<string, any>
-): Promise<{ content: Array<{ type: string; text: string }>; isError: boolean } | null> {
+  args: Record<string, any>,
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+} | null> {
   switch (toolName) {
     case "mysql_explain":
       return mysqlExplain(args.sql, args.format);
-    
+
     case "mysql_describe":
       return mysqlDescribe(args.table, args.database);
 
@@ -4418,40 +5671,58 @@ export async function handleAdditionalTool(
         args.database,
         args.table,
         args.format,
-        args.sampleRowsLimit
+        args.sampleRowsLimit,
       );
-    
+
     case "mysql_backup":
-      return mysqlBackup(args.table, args.format, args.database, args.whereClause, args.limit);
+      return mysqlBackup(
+        args.table,
+        args.format,
+        args.database,
+        args.whereClause,
+        args.limit,
+      );
 
     case "mysql_export_schema":
       return mysqlExportSchema(
         args.database,
         args.outputDir || args.outputPath,
-        args.includeDatabaseStatement
+        args.includeDatabaseStatement,
       );
-    
+
     case "mysql_import":
       return mysqlImport(args.table, args.data, args.database, args.mode);
-    
+
     case "mysql_compare_schemas":
       return mysqlCompareSchemas(args.sourceDb, args.targetDb);
-    
+
     case "mysql_generate_migration":
       return mysqlGenerateMigration(args.sourceDb, args.targetDb);
-    
+
     case "mysql_query_history":
       if (args.clear) {
         clearQueryHistory();
-        return { content: [{ type: "text", text: "Query history cleared" }], isError: false };
+        return {
+          content: [{ type: "text", text: "Query history cleared" }],
+          isError: false,
+        };
       }
       return {
-        content: [{ type: "text", text: JSON.stringify(getQueryHistory(args.limit), null, 2) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(getQueryHistory(args.limit), null, 2),
+          },
+        ],
         isError: false,
       };
-    
+
     case "mysql_call_procedure":
-      return mysqlCallProcedure(args.procedureName, args.params || [], args.database);
+      return mysqlCallProcedure(
+        args.procedureName,
+        args.params || [],
+        args.database,
+      );
 
     case "mysql_document_procedure":
       return mysqlDocumentProcedure(
@@ -4459,7 +5730,7 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql,
-        args.documentWithAi
+        args.documentWithAi,
       );
 
     case "mysql_document_function":
@@ -4468,7 +5739,7 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql,
-        args.documentWithAi
+        args.documentWithAi,
       );
 
     case "mysql_document_view":
@@ -4477,7 +5748,7 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql,
-        args.documentWithAi
+        args.documentWithAi,
       );
 
     case "mysql_export_procedure_docs":
@@ -4485,7 +5756,15 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir,
         args.includeSourceSql,
-        args.documentWithAi
+        args.documentWithAi,
+      );
+
+    case "mysql_export_function_docs":
+      return mysqlExportFunctionDocs(
+        args.database,
+        args.outputDir,
+        args.includeSourceSql,
+        args.documentWithAi,
       );
 
     case "mysql_generate_ai_docs":
@@ -4494,9 +5773,9 @@ export async function handleAdditionalTool(
         args.outputDir,
         args.includeSourceSql,
         args.includeDataDictionary,
-        args.documentWithAi
+        args.documentWithAi,
       );
-    
+
     case "mysql_show_views":
       return mysqlShowViews(args.database, args.viewName);
 
@@ -4505,36 +5784,42 @@ export async function handleAdditionalTool(
         args.routineName,
         args.database,
         args.routineType,
-        args.includeSnippets
+        args.includeSnippets,
       );
-    
+
     case "mysql_variables":
-      return mysqlVariables(args.action, args.scope, args.filter, args.variable, args.value);
-    
+      return mysqlVariables(
+        args.action,
+        args.scope,
+        args.filter,
+        args.variable,
+        args.value,
+      );
+
     case "mysql_index_suggestions":
       return mysqlIndexSuggestions(args.database);
-    
+
     case "mysql_foreign_keys":
       return mysqlForeignKeys(args.database, args.table);
-    
+
     case "mysql_table_stats":
       return mysqlTableStats(args.database, args.table);
-    
+
     case "mysql_process_list":
       return mysqlProcessList(args.full);
-    
+
     case "mysql_kill_process":
       return mysqlKillProcess(args.processId);
-    
+
     case "mysql_create_procedure":
       return mysqlCreateProcedure(
         args.procedureName,
         args.procedureBody,
         args.database,
         args.parameters,
-        args.characteristics
+        args.characteristics,
       );
-    
+
     case "mysql_alter_procedure":
       return mysqlAlterProcedure(
         args.procedureName,
@@ -4542,12 +5827,12 @@ export async function handleAdditionalTool(
         args.database,
         args.parameters,
         args.characteristics,
-        args.ifExists
+        args.ifExists,
       );
-    
+
     case "mysql_alter_table":
       return mysqlAlterTable(args.table, args.alterStatement, args.database);
-    
+
     default:
       return null; // Tool not handled here
   }
