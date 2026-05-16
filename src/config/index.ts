@@ -5,7 +5,7 @@ import { parseSchemaPermissions, parseMySQLConnectionString } from "../utils/ind
 export const MCP_VERSION = "2.0.2";
 
 // @INFO: Load environment variables from .env file
-dotenv.config();
+dotenv.config({ quiet: true });
 
 // @INFO: Parse connection string if provided
 // Connection string takes precedence over individual environment variables
