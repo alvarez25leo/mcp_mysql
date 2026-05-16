@@ -40,10 +40,7 @@ const createPool = (): mysql2.Pool => {
   const poolConfig = {
     ...config.mysql,
     // Add connection timeout and retry settings
-    acquireTimeout: process.env.MYSQL_ACQUIRE_TIMEOUT ? parseInt(process.env.MYSQL_ACQUIRE_TIMEOUT, 10) : 60000,
-    timeout: process.env.MYSQL_QUERY_TIMEOUT ? parseInt(process.env.MYSQL_QUERY_TIMEOUT, 10) : 30000,
-    // Reconnect on connection loss
-    reconnect: true,
+    connectTimeout: process.env.MYSQL_ACQUIRE_TIMEOUT ? parseInt(process.env.MYSQL_ACQUIRE_TIMEOUT, 10) : 60000,
     // Keep connections alive
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,

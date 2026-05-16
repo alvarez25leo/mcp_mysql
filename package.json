@@ -41,13 +41,13 @@
     "lint:markdown:fix": "markdownlint . --fix"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.2",
-    "dotenv": "^17.2.3",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "mysql2": "^3.16.0",
+    "mysql2": "^3.22.3",
     "node-sql-parser": "^5.4.0",
-    "openai": "^6.6.0",
-    "zod": "^4.3.5"
+    "openai": "^6.38.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
