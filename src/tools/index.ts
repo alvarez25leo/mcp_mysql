@@ -164,7 +164,7 @@ function shouldDocumentWithAi(requestedValue: boolean = false): boolean {
 }
 
 function getAiDocsModel(): string {
-  return process.env.MYSQL_AI_DOCS_OPENAI_MODEL || "gpt-5";
+  return process.env.MYSQL_AI_DOCS_OPENAI_MODEL || "gpt-4o";
 }
 
 function getAiDocsTemplatePath(

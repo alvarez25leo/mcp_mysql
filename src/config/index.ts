@@ -2,7 +2,7 @@ import * as dotenv from "dotenv";
 import { SchemaPermissions } from "../types/index.js";
 import { parseSchemaPermissions, parseMySQLConnectionString } from "../utils/index.js";
 
-export const MCP_VERSION = "2.0.2";
+export const MCP_VERSION = "2.0.7";
 
 // @INFO: Load environment variables from .env file
 dotenv.config({ quiet: true });

@@ -1,4 +1,3 @@
-import { performance } from "perf_hooks";
 import { isMultiDbMode } from "./../config/index.js";
 
 import {
@@ -31,7 +30,7 @@ function safeExit(code: number): void {
 }
 
 // @INFO: Lazy load MySQL pool
-let poolPromise: Promise<mysql2.Pool>;
+let poolPromise: Promise<mysql2.Pool> | null = null;
 let poolInstance: mysql2.Pool | null = null;
 let keepAliveInterval: NodeJS.Timeout | null = null;
 
@@ -39,11 +38,6 @@ let keepAliveInterval: NodeJS.Timeout | null = null;
 const createPool = (): mysql2.Pool => {
   const poolConfig = {
     ...config.mysql,
-    // Add connection timeout and retry settings
-    connectTimeout: process.env.MYSQL_ACQUIRE_TIMEOUT ? parseInt(process.env.MYSQL_ACQUIRE_TIMEOUT, 10) : 60000,
-    // Keep connections alive
-    enableKeepAlive: true,
-    keepAliveInitialDelay: 0,
   };
 
   const pool = mysql2.createPool(poolConfig);
@@ -53,9 +47,9 @@ const createPool = (): mysql2.Pool => {
     log("error", "MySQL pool error:", err);
     // If it's a connection error, reset the pool
     if (err.message.includes('Connection lost') || err.message.includes('timeout')) {
-      log("info", "Connection lost detected, pool will be recreated on next use");
+      log("error", "Connection lost detected, pool will be recreated on next use");
       poolInstance = null;
-      poolPromise = null as any;
+      poolPromise = null;
     }
   });
 
@@ -74,7 +68,7 @@ const getPool = async (): Promise<mysql2.Pool> => {
     } catch (error) {
       log("info", "Pool connection test failed, recreating pool");
       poolInstance = null;
-      poolPromise = null as any;
+      poolPromise = null;
     }
   }
 
@@ -86,7 +80,7 @@ const getPool = async (): Promise<mysql2.Pool> => {
       } catch (error) {
         log("error", "Error creating MySQL pool:", error);
         poolInstance = null;
-        poolPromise = null as any;
+        poolPromise = null;
         reject(error);
       }
     });
@@ -122,7 +116,7 @@ const startKeepAlive = () => {
       log("error", "Keep-alive query failed:", error);
       // Reset pool on keep-alive failure
       poolInstance = null;
-      poolPromise = null as any;
+      poolPromise = null;
     }
   }, keepAliveIntervalMs);
 
@@ -162,7 +156,7 @@ async function executeQuery<T>(sql: string, params: string[] = []): Promise<T> {
           log("info", `Connection error detected, retrying... (${retries}/${maxRetries})`);
           // Reset pool to force reconnection
           poolInstance = null;
-          poolPromise = null as any;
+          poolPromise = null;
           // Wait before retry
           await new Promise(resolve => setTimeout(resolve, 1000 * retries));
           continue;
@@ -174,7 +168,7 @@ async function executeQuery<T>(sql: string, params: string[] = []): Promise<T> {
     } finally {
       if (connection) {
         connection.release();
-        log("error", "Connection released");
+        log("info", "Connection released");
       }
     }
   }
@@ -192,7 +186,7 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
     try {
       const pool = await getPool();
       connection = await pool.getConnection();
-      log("error", "Write connection acquired");
+      log("info", "Write connection acquired");
       break; // Success, exit retry loop
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -204,7 +198,7 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
         if (retries < maxRetries) {
           log("info", `Connection error, retrying... (${retries}/${maxRetries})`);
           poolInstance = null;
-          poolPromise = null as any;
+          poolPromise = null;
           await new Promise(resolve => setTimeout(resolve, 1000 * retries));
           continue;
         }
@@ -312,7 +306,7 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
   } finally {
     if (connection) {
       connection.release();
-      log("error", "Write connection released");
+      log("info", "Write connection released");
     }
   }
 }
@@ -425,7 +419,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
         pool = await getPool();
         connection = await pool.getConnection();
         connectionAcquired = true;
-        log("error", "Read-only connection acquired");
+        log("info", "Read-only connection acquired");
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (errorMessage.includes('Connection lost') || 
@@ -436,7 +430,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
           if (retries < maxRetries) {
             log("info", `Connection error, retrying... (${retries}/${maxRetries})`);
             poolInstance = null;
-            poolPromise = null as any;
+            poolPromise = null;
             await new Promise(resolve => setTimeout(resolve, 1000 * retries));
             continue;
           }
@@ -558,7 +552,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
     } finally {
     if (connection) {
       connection.release();
-      log("error", "Read-only connection released");
+      log("info", "Read-only connection released");
     }
   }
 }
@@ -578,21 +572,8 @@ const cleanup = async () => {
     }
     poolInstance = null;
   }
-  poolPromise = null as any;
+  poolPromise = null;
 };
-
-// Handle process termination
-if (!isTestEnvironment) {
-  process.on('SIGINT', async () => {
-    await cleanup();
-    process.exit(0);
-  });
-  
-  process.on('SIGTERM', async () => {
-    await cleanup();
-    process.exit(0);
-  });
-}
 
 export {
   isTestEnvironment,

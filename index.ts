@@ -857,25 +857,11 @@ export default function createMcpServer({
 * @returns {boolean} - True if the module is the main module, false otherwise.
 */
 const isMainModule = () => {
-  // 1. Standard check for CommonJS
-  // `require.main` refers to the application's entry point module.
-  // If it's the same as the current `module`, this file was executed directly.
-  if (typeof require !== 'undefined' && require.main === module) {
-    return true;
-  }
-  // 2. Check for ES Modules (ESM)
-  // `import.meta.url` provides the file URL of the current module.
-  // `process.argv[1]` provides the path of the executed script.
-  if (typeof import.meta !== 'undefined' && import.meta.url && process.argv[1]) {
-    // Convert the `import.meta.url` (e.g., 'file:///path/to/file.js') to a system-standard absolute path.
+  if (import.meta.url && process.argv[1]) {
     const currentModulePath = fileURLToPath(import.meta.url);
-    // Resolve `process.argv[1]` (which can be a relative path) to a standard absolute path.
-    // Use realpathSync to resolve symlinks for proper comparison
     const mainScriptPath = realpathSync(process.argv[1]);
-    // Compare the two standardized absolute paths.
     return currentModulePath === mainScriptPath;
   }
-  // Fallback if neither of the above conditions are met.
   return false;
 }
 
@@ -899,7 +885,7 @@ if (isMainModule()) {
             !req.get("Authorization")?.startsWith("Bearer ") ||
             !req.get("Authorization")?.endsWith(REMOTE_SECRET_KEY)
           ) {
-            console.error("Missing or invalid Authorization header");
+            log("error", "Missing or invalid Authorization header");
             res.status(401).json({
               jsonrpc: "2.0",
               error: {
@@ -940,7 +926,7 @@ if (isMainModule()) {
 
         // SSE notifications not supported in stateless mode
         app.get("/mcp", async (req: Request, res: Response) => {
-          console.log("Received GET MCP request");
+          log("info", "Received GET MCP request");
           res.writeHead(405).end(
             JSON.stringify({
               jsonrpc: "2.0",
@@ -955,7 +941,7 @@ if (isMainModule()) {
 
         // Session termination not needed in stateless mode
         app.delete("/mcp", async (req: Request, res: Response) => {
-          console.log("Received DELETE MCP request");
+          log("info", "Received DELETE MCP request");
           res.writeHead(405).end(
             JSON.stringify({
               jsonrpc: "2.0",
@@ -971,12 +957,10 @@ if (isMainModule()) {
         // Start the server
         app.listen(PORT, (error) => {
           if (error) {
-            console.error("Failed to start server:", error);
+            log("error", "Failed to start server:", error);
             process.exit(1);
           }
-          console.log(
-            `MCP Stateless Streamable HTTP Server listening on port ${PORT}`,
-          );
+          log("info", `MCP Stateless Streamable HTTP Server listening on port ${PORT}`);
         });
       } else {
         const transport = new StdioServerTransport();
