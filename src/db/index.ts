@@ -463,10 +463,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
 
     try {
       // Execute query - in multi-DB mode, we may need to handle USE statements specially
-      const startTime = performance.now();
       const result = await connection.query(sql);
-      const endTime = performance.now();
-      const duration = endTime - startTime;
       const rows = Array.isArray(result) ? result[0] : result;
 
       // Rollback transaction (since it's read-only)
@@ -477,32 +474,28 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
         await connection.query("SET SESSION TRANSACTION READ WRITE");
       }
 
-      // Format results for better visibility
+      // Keep the primary text payload machine-readable. Several handlers parse
+      // this field directly when they build MCP resources and higher-level tools.
       let resultText: string;
-      let summaryText: string;
       
       if (Array.isArray(rows)) {
         if (rows.length === 0) {
           resultText = "[]";
-          summaryText = `\n--- Query executed successfully: 0 rows returned ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
         } else {
           resultText = JSON.stringify(rows, null, 2);
-          summaryText = `\n--- Query executed successfully: ${rows.length} row(s) returned ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
         }
       } else if (rows && typeof rows === 'object') {
         // Handle result set headers or other object responses
         resultText = JSON.stringify(rows, null, 2);
-        summaryText = `\n--- Query executed successfully ---\n--- Execution time: ${duration.toFixed(2)} ms ---`;
       } else {
         resultText = String(rows || "Query executed successfully");
-        summaryText = `\n--- Execution time: ${duration.toFixed(2)} ms ---`;
       }
 
       return {
         content: [
           {
             type: "text",
-            text: resultText + summaryText,
+            text: resultText,
           },
         ],
         isError: false,

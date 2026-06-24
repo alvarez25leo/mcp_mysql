@@ -52,7 +52,7 @@ import { realpathSync } from 'fs';
 log("info", `Starting MySQL MCP server v${version}...`);
 
 // Update tool description to include multi-DB mode and schema-specific permissions
-const toolVersion = `MySQL MCP Server [v${process.env.npm_package_version}]`;
+const toolVersion = `MySQL MCP Server [v${version}]`;
 let toolDescription = `[${toolVersion}] Run SQL queries against MySQL database`;
 
 if (isMultiDbMode) {

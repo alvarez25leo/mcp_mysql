@@ -1,14 +1,17 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
+
+vi.hoisted(() => {
+  process.env.ALLOW_INSERT_OPERATION = "false";
+  process.env.ALLOW_UPDATE_OPERATION = "false";
+  process.env.ALLOW_DELETE_OPERATION = "false";
+  process.env.ALLOW_DDL_OPERATION = "false";
+});
+
 import {
   executeQuery,
   executeReadOnlyQuery,
   executeWriteQuery,
 } from "../../dist/src/db/index.js";
-
-// Mock environment variables for write operation flags
-vi.stubEnv("ALLOW_INSERT_OPERATION", "false");
-vi.stubEnv("ALLOW_UPDATE_OPERATION", "false");
-vi.stubEnv("ALLOW_DELETE_OPERATION", "false");
 
 // Mock mysql2/promise
 vi.mock("mysql2/promise", () => {
@@ -22,6 +25,7 @@ vi.mock("mysql2/promise", () => {
 
   const mockPool = {
     getConnection: vi.fn().mockResolvedValue(mockConnection),
+    on: vi.fn(),
   };
 
   return {
@@ -242,4 +246,3 @@ describe("Query Functions", () => {
     });
   });
 });
-
