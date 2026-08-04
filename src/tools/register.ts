@@ -17,6 +17,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { performance } from "perf_hooks";
 import { log } from "../utils/index.js";
 import { executeReadOnlyQuery } from "../db/index.js";
+import { splitSqlStatements } from "../db/utils.js";
 import {
   additionalToolDefinitions,
   handleAdditionalTool,
@@ -265,7 +266,7 @@ export function registerAllTools(
           .string()
           .min(1)
           .describe(
-            "The SQL query to execute. Can be any valid MySQL statement: SELECT (read data), INSERT/UPDATE/DELETE (modify data, requires permissions), CREATE/ALTER/DROP (DDL operations, requires permissions), CALL (stored procedures), SHOW (metadata queries), etc. Prefer ? placeholders with 'params' for values.",
+            "The SQL to execute. Can be any valid MySQL statement: SELECT (read data), INSERT/UPDATE/DELETE (modify data, requires permissions), CREATE/ALTER/DROP (DDL operations, requires permissions), CALL (stored procedures), SHOW (metadata queries), etc. Multi-statement scripts separated by ';' are supported: each statement runs independently in order (own permission checks and transaction, NO shared transaction) and execution stops at the first error. Prefer ? placeholders with 'params' for values (single statement only).",
           ),
         params: z
           .array(z.union([z.string(), z.number(), z.boolean(), z.null()]))
@@ -293,6 +294,15 @@ export function registerAllTools(
           .optional()
           .describe(
             "If true, write statements run inside a transaction that is ROLLED BACK: you get the real affectedRows without applying any change. Ideal to preview UPDATE/DELETE scope.",
+          ),
+        timeoutMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(600000)
+          .optional()
+          .describe(
+            "Per-statement timeout in ms (default 60000). On expiry the statement is aborted with KILL QUERY. Use 0 to disable, or raise it for known-slow queries.",
           ),
       },
       outputSchema: {
@@ -329,6 +339,23 @@ export function registerAllTools(
           .boolean()
           .optional()
           .describe("True when the write was rolled back (preview mode)"),
+        statementCount: z
+          .number()
+          .optional()
+          .describe("Total statements detected in a multi-statement script"),
+        executedStatements: z
+          .number()
+          .optional()
+          .describe("Statements actually executed (stops at first error)"),
+        failedAtIndex: z
+          .number()
+          .nullable()
+          .optional()
+          .describe("1-based index of the failing statement, null if all succeeded"),
+        statements: z
+          .array(z.unknown())
+          .optional()
+          .describe("Per-statement structured results (multi-statement scripts)"),
         message: z.string().optional(),
         result: z.unknown().optional(),
         error: z
@@ -349,34 +376,120 @@ export function registerAllTools(
         openWorldHint: false,
       },
     },
-    async ({ sql, params, maxRows, allowFullTableWrite, dryRun }) => {
+    async ({ sql, params, maxRows, allowFullTableWrite, dryRun, timeoutMs }) => {
       const startTime = performance.now();
+      const effectiveTimeout = timeoutMs === 0 ? undefined : (timeoutMs ?? 60000);
+      const queryOptions = {
+        maxRows: maxRows ?? 500,
+        params,
+        allowFullTableWrite,
+        dryRun,
+        timeoutMs: effectiveTimeout,
+      };
+
+      type QueryResult = {
+        content: Array<{ type: string; text: string }>;
+        structured?: Record<string, unknown>;
+        isError: boolean;
+      };
+
       try {
-        const result = await executeReadOnlyQuery<{
-          content: Array<{ type: string; text: string }>;
-          structured?: Record<string, unknown>;
-          isError: boolean;
-        }>(sql, {
-          maxRows: maxRows ?? 500,
-          params,
-          allowFullTableWrite,
-          dryRun,
-        });
-        const duration = performance.now() - startTime;
+        const statements = splitSqlStatements(sql);
 
-        const rowCount =
-          typeof result.structured?.rowCount === "number"
-            ? (result.structured.rowCount as number)
-            : 0;
-        addToQueryHistory(sql, duration, rowCount, !result.isError);
+        // Single statement: original behavior
+        if (statements.length <= 1) {
+          const result = await executeReadOnlyQuery<QueryResult>(
+            statements[0] ?? sql,
+            queryOptions,
+          );
+          const duration = performance.now() - startTime;
+          const rowCount =
+            typeof result.structured?.rowCount === "number"
+              ? (result.structured.rowCount as number)
+              : 0;
+          addToQueryHistory(sql, duration, rowCount, !result.isError);
 
-        // structuredContent also on errors: the SDK skips output validation
-        // when isError, and the machine-readable error code helps the model
+          // structuredContent also on errors: the SDK skips output validation
+          // when isError, and the machine-readable error code helps the model
+          return {
+            content: result.content,
+            isError: result.isError,
+            structuredContent:
+              result.structured ?? { message: result.content[0]?.text ?? "" },
+          } as any;
+        }
+
+        // Multi-statement script: each statement runs independently (own
+        // permission checks, guards and transaction). Stops at first error.
+        if (params && params.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error: 'params' no está soportado con múltiples sentencias (es ambiguo a qué sentencia pertenece cada ?). Divide el script en llamadas separadas o incluye los valores en el SQL.",
+              },
+            ],
+            isError: true,
+          } as any;
+        }
+
+        const perStatement: Array<Record<string, unknown>> = [];
+        const contentBlocks: Array<{ type: string; text: string }> = [];
+        let failedAtIndex: number | null = null;
+
+        for (let index = 0; index < statements.length; index++) {
+          const statement = statements[index];
+          const stmtStart = performance.now();
+          const result = await executeReadOnlyQuery<QueryResult>(
+            statement,
+            queryOptions,
+          );
+          const stmtDuration = performance.now() - stmtStart;
+
+          const rowCount =
+            typeof result.structured?.rowCount === "number"
+              ? (result.structured.rowCount as number)
+              : 0;
+          addToQueryHistory(statement, stmtDuration, rowCount, !result.isError);
+
+          perStatement.push({
+            index: index + 1,
+            sql:
+              statement.length > 150
+                ? `${statement.substring(0, 150)}...`
+                : statement,
+            isError: result.isError,
+            ...(result.structured ?? {
+              message: result.content[0]?.text ?? "",
+            }),
+          });
+
+          contentBlocks.push({
+            type: "text",
+            text: `-- Sentencia ${index + 1}/${statements.length} --\n${result.content
+              .map((block) => block.text)
+              .join("\n")}`,
+          });
+
+          if (result.isError) {
+            failedAtIndex = index + 1;
+            contentBlocks.push({
+              type: "text",
+              text: `Ejecución detenida en la sentencia ${failedAtIndex}: las ${statements.length - failedAtIndex} restantes no se ejecutaron. Cada sentencia previa ya aplicada NO se revierte (no hay transacción compartida).`,
+            });
+            break;
+          }
+        }
+
         return {
-          content: result.content,
-          isError: result.isError,
-          structuredContent:
-            result.structured ?? { message: result.content[0]?.text ?? "" },
+          content: contentBlocks,
+          isError: failedAtIndex !== null,
+          structuredContent: {
+            statementCount: statements.length,
+            executedStatements: perStatement.length,
+            failedAtIndex,
+            statements: perStatement,
+          },
         } as any;
       } catch (error) {
         const duration = performance.now() - startTime;

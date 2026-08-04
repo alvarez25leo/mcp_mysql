@@ -150,4 +150,131 @@ function detectFullTableWrites(sql: string): string[] {
   }
 }
 
-export { extractSchemaFromQuery, getQueryTypes, detectFullTableWrites };
+/**
+ * Split a SQL script into individual statements, honoring string literals
+ * (' " `), escapes, and comments (-- # &#47;* *&#47;). Routine DDL
+ * (CREATE/ALTER PROCEDURE|FUNCTION|TRIGGER|EVENT) is returned as a single
+ * statement because its body contains internal semicolons.
+ */
+function splitSqlStatements(sql: string): string[] {
+  if (
+    /\b(CREATE|ALTER)\s+(DEFINER\s*=\s*\S+\s+)?(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i.test(
+      sql,
+    )
+  ) {
+    const single = sql.trim();
+    return single ? [single] : [];
+  }
+
+  type State =
+    | "none"
+    | "single"
+    | "double"
+    | "backtick"
+    | "lineComment"
+    | "blockComment";
+
+  const statements: string[] = [];
+  let current = "";
+  let state: State = "none";
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    switch (state) {
+      case "none":
+        if (ch === "'") {
+          state = "single";
+          current += ch;
+        } else if (ch === '"') {
+          state = "double";
+          current += ch;
+        } else if (ch === "`") {
+          state = "backtick";
+          current += ch;
+        } else if (ch === "#") {
+          state = "lineComment";
+          current += ch;
+        } else if (
+          ch === "-" &&
+          next === "-" &&
+          (sql[i + 2] === undefined || /\s/.test(sql[i + 2]))
+        ) {
+          state = "lineComment";
+          current += ch;
+        } else if (ch === "/" && next === "*") {
+          state = "blockComment";
+          current += ch;
+        } else if (ch === ";") {
+          statements.push(current);
+          current = "";
+        } else {
+          current += ch;
+        }
+        break;
+      case "single":
+      case "double": {
+        const quote = state === "single" ? "'" : '"';
+        current += ch;
+        if (ch === "\\" && next !== undefined) {
+          current += next;
+          i++;
+        } else if (ch === quote) {
+          if (next === quote) {
+            current += next;
+            i++;
+          } else {
+            state = "none";
+          }
+        }
+        break;
+      }
+      case "backtick":
+        current += ch;
+        if (ch === "`") {
+          if (next === "`") {
+            current += next;
+            i++;
+          } else {
+            state = "none";
+          }
+        }
+        break;
+      case "lineComment":
+        current += ch;
+        if (ch === "\n") {
+          state = "none";
+        }
+        break;
+      case "blockComment":
+        current += ch;
+        if (ch === "*" && next === "/") {
+          current += next;
+          i++;
+          state = "none";
+        }
+        break;
+    }
+  }
+  statements.push(current);
+
+  // Drop empty and comment-only fragments (MySQL rejects empty queries)
+  return statements
+    .map((statement) => statement.trim())
+    .filter((statement) => {
+      if (statement.length === 0) return false;
+      const withoutComments = statement
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|\n)\s*(--[^\n]*|#[^\n]*)/g, "")
+        .trim();
+      return withoutComments.length > 0;
+    });
+}
+
+export {
+  extractSchemaFromQuery,
+  getQueryTypes,
+  detectFullTableWrites,
+  splitSqlStatements,
+};

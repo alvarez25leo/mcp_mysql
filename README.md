@@ -370,6 +370,14 @@ INSERT/UPDATE/DELETE/DDL.
 | `maxRows` | number | no | Máximo de filas a devolver (default 500, máx 5000). Si se trunca, la respuesta lo indica con `truncated: true`. |
 | `allowFullTableWrite` | boolean | no | Obligatorio (`true`) para ejecutar UPDATE/DELETE **sin WHERE**. Por defecto esas escrituras de tabla completa se bloquean como protección. |
 | `dryRun` | boolean | no | `true` ejecuta la escritura en una transacción con ROLLBACK: devuelve los `affectedRows` reales sin aplicar ningún cambio. Ideal para previsualizar UPDATE/DELETE. |
+| `timeoutMs` | number | no | Timeout por sentencia en ms (default 60000, máx 600000). Al expirar, la sentencia se aborta con `KILL QUERY` y el agente recupera el control. `0` lo desactiva. |
+
+Soporta **scripts multi-sentencia** separados por `;` (respetando strings,
+comentarios y cuerpos de rutinas): cada sentencia se ejecuta en orden con sus
+propios chequeos de permisos y su propia transacción (no hay transacción
+compartida), y la ejecución se detiene en el primer error indicando
+`failedAtIndex` y los resultados por sentencia en `statements`. `params` solo
+aplica a sentencia única.
 
 Ejemplo de argumentos:
 

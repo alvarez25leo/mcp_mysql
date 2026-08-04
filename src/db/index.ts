@@ -184,6 +184,83 @@ if (!isTestEnvironment) {
   }, 10000); // Start after 10 seconds
 }
 
+/**
+ * Run a query with a hard timeout. On expiry the running statement is
+ * aborted with KILL QUERY from a second connection (engine-agnostic: works
+ * on MySQL and MariaDB); if the statement cannot be interrupted within a
+ * grace period, the connection socket is destroyed as a last resort so the
+ * agent is never left hanging.
+ */
+function queryWithTimeout(
+  connection: mysql2.PoolConnection,
+  sql: string,
+  params: any[],
+  timeoutMs?: number,
+): Promise<any> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return connection.query(sql, params);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+
+    const timeoutError = () =>
+      new Error(
+        `Query cancelada por timeout (${timeoutMs} ms). La sentencia fue interrumpida con KILL QUERY; ajusta timeoutMs si necesitas más tiempo.`,
+      );
+
+    const killTimer = setTimeout(async () => {
+      timedOut = true;
+      const threadId = (connection as any).threadId;
+      if (threadId) {
+        try {
+          const pool = await getPool();
+          await pool.query(`KILL QUERY ${Number(threadId)}`);
+          log("info", `Timeout: issued KILL QUERY ${threadId} after ${timeoutMs}ms`);
+        } catch (killError) {
+          log("error", "Failed to KILL timed-out query:", killError);
+        }
+      }
+      // Last resort if the statement is not interruptible
+      const hardTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try {
+            connection.destroy();
+          } catch {
+            // ignore
+          }
+          reject(timeoutError());
+        }
+      }, 5000);
+      (hardTimer as any).unref?.();
+    }, timeoutMs);
+
+    connection
+      .query(sql, params)
+      .then((result) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(killTimer);
+          resolve(result);
+        }
+      })
+      .catch((error: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(killTimer);
+          const interrupted =
+            timedOut &&
+            (error?.errno === 1317 || // ER_QUERY_INTERRUPTED
+              error?.errno === 3024 || // ER_QUERY_TIMEOUT
+              error?.code === "ER_QUERY_INTERRUPTED");
+          reject(interrupted ? timeoutError() : error);
+        }
+      });
+  });
+}
+
 async function executeQuery<T>(sql: string, params: string[] = []): Promise<T> {
   let connection;
   let retries = 0;
@@ -236,6 +313,7 @@ async function executeWriteQuery<T>(
   sql: string,
   params: any[] = [],
   dryRun: boolean = false,
+  timeoutMs?: number,
 ): Promise<T> {
   let connection;
   let retries = 0;
@@ -281,7 +359,7 @@ async function executeWriteQuery<T>(
     try {
       // @INFO: Execute the write query
       const startTime = performance.now();
-      const result = await connection.query(sql, params);
+      const result = await queryWithTimeout(connection, sql, params, timeoutMs);
       const endTime = performance.now();
       const duration = endTime - startTime;
       const response = Array.isArray(result) ? result[0] : result;
@@ -420,6 +498,7 @@ async function executeReadOnlyQuery<T>(
     params?: any[];
     allowFullTableWrite?: boolean;
     dryRun?: boolean;
+    timeoutMs?: number;
   } = {},
 ): Promise<T> {
   let connection: mysql2.PoolConnection | undefined;
@@ -561,7 +640,12 @@ async function executeReadOnlyQuery<T>(
       (isDeleteOperation && isDeleteAllowedForSchema(schema)) ||
       (isDDLOperation && isDDLAllowedForSchema(schema))
     ) {
-      return executeWriteQuery(sql, options.params ?? [], options.dryRun ?? false);
+      return executeWriteQuery(
+        sql,
+        options.params ?? [],
+        options.dryRun ?? false,
+        options.timeoutMs,
+      );
     }
 
     // For read-only operations, continue with the original logic
@@ -619,7 +703,12 @@ async function executeReadOnlyQuery<T>(
 
     try {
       // Execute query - in multi-DB mode, we may need to handle USE statements specially
-      const result = await connection.query(sql, options.params ?? []);
+      const result = await queryWithTimeout(
+        connection,
+        sql,
+        options.params ?? [],
+        options.timeoutMs,
+      );
       const rows = Array.isArray(result) ? result[0] : result;
       const fields = Array.isArray(result)
         ? (result[1] as mysql2.FieldPacket[] | undefined)
