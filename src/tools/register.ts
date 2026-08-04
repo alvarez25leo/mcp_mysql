@@ -896,13 +896,22 @@ export function registerAllTools(
         .boolean()
         .optional()
         .describe("Usar CREATE TABLE IF NOT EXISTS para migraciones re-ejecutables. Default: true."),
-      includeViews: z.boolean().optional().describe("Generar vistas. Default: true."),
+      includeViews: z
+        .boolean()
+        .optional()
+        .describe("Generar también vistas. Default: false (solo tablas)."),
       includeRoutines: z
         .boolean()
         .optional()
-        .describe("Generar functions y procedures. Default: true."),
-      includeTriggers: z.boolean().optional().describe("Generar triggers. Default: true."),
-      includeEvents: z.boolean().optional().describe("Generar events. Default: true."),
+        .describe("Generar también functions y procedures. Default: false (solo tablas)."),
+      includeTriggers: z
+        .boolean()
+        .optional()
+        .describe("Generar también triggers. Default: false (solo tablas)."),
+      includeEvents: z
+        .boolean()
+        .optional()
+        .describe("Generar también events. Default: false (solo tablas)."),
       stripDefiner: z
         .boolean()
         .optional()

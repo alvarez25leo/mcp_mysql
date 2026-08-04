@@ -1802,10 +1802,11 @@ export async function mysqlGenerateMigrationFiles(
       datePrefix,
       startSequence = 1,
       ifNotExists = true,
-      includeViews = true,
-      includeRoutines = true,
-      includeTriggers = true,
-      includeEvents = true,
+      // Solo tablas por defecto: vistas, rutinas, triggers y events son opt-in
+      includeViews = false,
+      includeRoutines = false,
+      includeTriggers = false,
+      includeEvents = false,
       stripDefiner = true,
       stripAutoIncrement = true,
     } = options;
@@ -4828,7 +4829,7 @@ export const additionalToolDefinitions = [
   {
     name: "mysql_generate_migration_files",
     description:
-      "Genera migraciones SQL estilo Laravel: un archivo .sql por tabla con prefijo de fecha y secuencia (2026_08_04_000001_create_users_table.sql), ordenados topológicamente por dependencias de foreign keys para que ejecutarlos en orden de nombre nunca falle. Maneja ciclos de FKs y FKs a otras bases (se difieren a un archivo final add_foreign_keys), FKs auto-referenciadas, y genera también functions, procedures, vistas (ordenadas por dependencias entre vistas), triggers y events en el orden correcto. Elimina DEFINER y AUTO_INCREMENT para que los archivos sean portables. Usa este tool cuando el usuario pida 'migraciones por tabla', 'archivos de migración' o convertir el esquema a migraciones.",
+      "Genera migraciones SQL estilo Laravel: un archivo .sql por TABLA con prefijo de fecha y secuencia (2026_08_04_000001_create_users_table.sql), ordenados topológicamente por dependencias de foreign keys para que ejecutarlos en orden de nombre nunca falle. Maneja ciclos de FKs y FKs a otras bases (se difieren a un archivo final add_foreign_keys) y FKs auto-referenciadas. Por defecto genera SOLO tablas; vistas, functions/procedures, triggers y events son opt-in con includeViews/includeRoutines/includeTriggers/includeEvents. Elimina DEFINER y AUTO_INCREMENT para que los archivos sean portables. Usa este tool cuando el usuario pida 'migraciones por tabla', 'archivos de migración' o convertir el esquema a migraciones.",
     inputSchema: {
       type: "object",
       properties: {

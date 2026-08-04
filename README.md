@@ -630,8 +630,8 @@ archivos de migración por tabla. (Nombre anterior:
 
 #### `mysql_generate_migration_files`
 
-Convierte el esquema en **migraciones estilo Laravel**: un archivo `.sql`
-por tabla con prefijo de fecha y secuencia
+Convierte las **tablas** de la base en **migraciones estilo Laravel**: un
+archivo `.sql` por tabla con prefijo de fecha y secuencia
 (`2026_08_04_000001_create_users_table.sql`), **ordenados topológicamente
 por dependencias de foreign keys** — ejecutarlos en orden de nombre nunca
 falla. Casuísticas cubiertas:
@@ -640,13 +640,13 @@ falla. Casuísticas cubiertas:
   se retiran del `CREATE TABLE` y se difieren a un archivo final
   `add_foreign_keys.sql` (con el motivo comentado).
 - FKs auto-referenciadas: se mantienen inline (no rompen el orden).
-- Genera también functions y procedures (antes de las vistas, porque una
-  vista puede usarlas), vistas ordenadas por dependencias entre vistas
-  (`CREATE OR REPLACE`), triggers y events, cada uno con `DROP IF EXISTS` y
-  bloques `DELIMITER`.
 - Elimina `DEFINER` (rompe al importar en otro servidor) y el contador
   `AUTO_INCREMENT=N`; usa `CREATE TABLE IF NOT EXISTS` para que las
   migraciones sean re-ejecutables.
+- Por defecto genera **solo tablas**. Si lo necesitas, puede generar también
+  vistas (ordenadas por dependencias entre vistas, `CREATE OR REPLACE`),
+  functions/procedures, triggers y events activando los flags `include*` —
+  cada uno con `DROP IF EXISTS` y bloques `DELIMITER`, en el orden correcto.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -655,10 +655,10 @@ falla. Casuísticas cubiertas:
 | `datePrefix` | string | no | Prefijo de fecha `YYYY_MM_DD`. Default: hoy. |
 | `startSequence` | number | no | Secuencia inicial (default 1 → `000001`). |
 | `ifNotExists` | boolean | no | `CREATE TABLE IF NOT EXISTS`. Default `true`. |
-| `includeViews` | boolean | no | Generar vistas. Default `true`. |
-| `includeRoutines` | boolean | no | Generar functions/procedures. Default `true`. |
-| `includeTriggers` | boolean | no | Generar triggers. Default `true`. |
-| `includeEvents` | boolean | no | Generar events. Default `true`. |
+| `includeViews` | boolean | no | Generar también vistas. Default `false`. |
+| `includeRoutines` | boolean | no | Generar también functions/procedures. Default `false`. |
+| `includeTriggers` | boolean | no | Generar también triggers. Default `false`. |
+| `includeEvents` | boolean | no | Generar también events. Default `false`. |
 | `stripDefiner` | boolean | no | Eliminar `DEFINER`. Default `true`. |
 | `stripAutoIncrement` | boolean | no | Eliminar `AUTO_INCREMENT=N`. Default `true`. |
 
