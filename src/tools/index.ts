@@ -1104,7 +1104,7 @@ function renderDataDictionaryMarkdown(payload: any): string {
 }
 
 // ============================================================================
-// TOOL: mysql_backup - Export table data to JSON/CSV
+// TOOL: mysql_export_data (antes mysql_backup) - Export table data
 // ============================================================================
 
 export async function mysqlBackup(
@@ -1237,7 +1237,7 @@ export async function mysqlBackup(
       isError: false,
     };
   } catch (error) {
-    log("error", "Error in mysql_backup:", error);
+    log("error", "Error in mysql_export_data:", error);
     const info = describeMysqlError(error);
     const suggestions =
       info.code === "ER_NO_SUCH_TABLE"
@@ -2553,7 +2553,7 @@ export async function mysqlCompareSchemas(
 }
 
 // ============================================================================
-// TOOL: mysql_generate_migration - Generate migration SQL scripts
+// TOOL: mysql_sync_migration (antes mysql_generate_migration) - Diff script
 // ============================================================================
 
 export async function mysqlGenerateMigration(
@@ -2704,7 +2704,7 @@ export async function mysqlGenerateMigration(
       isError: false,
     };
   } catch (error) {
-    log("error", "Error in mysql_generate_migration:", error);
+    log("error", "Error in mysql_sync_migration:", error);
     return {
       content: [
         {
@@ -4720,9 +4720,9 @@ export const additionalToolDefinitions = [
     },
   },
   {
-    name: "mysql_backup",
+    name: "mysql_export_data",
     description:
-      "Export table data to JSON or CSV format. Use this tool to backup data, export for analysis, or transfer data between systems. Supports filtering with WHERE clauses and limiting row count. Returns the exported data in the specified format.",
+      "Export data from ONE table to JSON, CSV or SQL (INSERT statements). Use this tool to extract rows for analysis, seeding, or transfer between systems. Supports column selection, WHERE filtering, row limit and writing to a file. NOTE: this is a per-table data export, NOT a full database backup — for full DDL use mysql_export_schema or mysql_generate_migration_files.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4805,9 +4805,9 @@ export const additionalToolDefinitions = [
     },
   },
   {
-    name: "mysql_generate_migration",
+    name: "mysql_sync_migration",
     description:
-      "Generate a SQL migration script to synchronize two database schemas. Use this after mysql_compare_schemas to create ALTER TABLE statements that will make the target database match the source. The generated script includes CREATE TABLE for missing tables, ALTER TABLE for column changes, and commented DROP statements for safety. Review the script carefully before executing.",
+      "Generate a SQL script to SYNCHRONIZE TWO existing databases (schema diff): compares sourceDb vs targetDb and produces the ALTER/CREATE statements that make target match source, with data-loss warnings, commented DROPs and a DOWN section to revert. Use this for drift between environments (dev vs prod). NOT for scaffolding per-table migration files from one database — that is mysql_generate_migration_files. Review the script carefully before executing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5253,7 +5253,8 @@ export async function handleAdditionalTool(
         context,
       );
 
-    case "mysql_backup":
+    case "mysql_export_data":
+    case "mysql_backup": // alias retrocompatible (nombre anterior)
       return mysqlBackup(
         args.table,
         args.format,
@@ -5275,7 +5276,8 @@ export async function handleAdditionalTool(
     case "mysql_compare_schemas":
       return mysqlCompareSchemas(args.sourceDb, args.targetDb);
 
-    case "mysql_generate_migration":
+    case "mysql_sync_migration":
+    case "mysql_generate_migration": // alias retrocompatible (nombre anterior)
       return mysqlGenerateMigration(args.sourceDb, args.targetDb);
 
     case "mysql_generate_migration_files":

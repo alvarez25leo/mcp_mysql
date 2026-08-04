@@ -609,7 +609,7 @@ export function registerPrompts(server: McpServer) {
               `Prepara una migración segura de esquema desde '${sourceDb}' hacia '${targetDb}':`,
               ``,
               `1. Ejecuta mysql_compare_schemas con sourceDb="${sourceDb}" y targetDb="${targetDb}". Presta atención a columnTypeDifferences con severity="breaking" y a objectDifferences (rutinas/vistas/triggers con distinta definición).`,
-              `2. Ejecuta mysql_generate_migration con los mismos argumentos para obtener el script (incluye sección DOWN para revertir).`,
+              `2. Ejecuta mysql_sync_migration con los mismos argumentos para obtener el script (incluye sección DOWN para revertir).`,
               `3. Revisa el script: señala explícitamente cada línea marcada con "POSIBLE PÉRDIDA DE DATOS" y los DROP comentados.`,
               `4. NO ejecutes la migración. Preséntala con un resumen de riesgos y pide confirmación antes de aplicar nada.`,
             ].join("\n"),

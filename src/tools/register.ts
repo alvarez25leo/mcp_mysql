@@ -770,7 +770,7 @@ export function registerAllTools(
   // ==========================================================================
   registerDispatchedTool(
     server,
-    "mysql_backup",
+    "mysql_export_data",
     "Export table data",
     {
       table: z.string().describe("Name of the table to export data from"),
@@ -856,8 +856,8 @@ export function registerAllTools(
 
   registerDispatchedTool(
     server,
-    "mysql_generate_migration",
-    "Generate migration SQL",
+    "mysql_sync_migration",
+    "Sync two schemas (diff script)",
     {
       sourceDb: z.string().describe("Source database (desired state)"),
       targetDb: z.string().describe("Target database (will be modified to match)"),

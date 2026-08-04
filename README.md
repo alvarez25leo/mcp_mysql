@@ -550,10 +550,13 @@ una variable (esto último requiere `ALLOW_ADMIN_OPERATION=true`).
 
 ### Exportación y datos
 
-#### `mysql_backup`
+#### `mysql_export_data`
 
-Exporta los datos de una tabla a JSON, CSV o SQL (INSERTs listos para
+Exporta los datos de **una tabla** a JSON, CSV o SQL (INSERTs listos para
 reproducir), con filtro WHERE, selección de columnas y límite opcionales.
+No es un backup completo de la base — para el DDL usa `mysql_export_schema`
+o `mysql_generate_migration_files`. (Nombre anterior: `mysql_backup`, que
+sigue funcionando como alias.)
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -609,13 +612,16 @@ prod).
 | `sourceDb` | string | sí | Base origen (la referencia). |
 | `targetDb` | string | sí | Base destino a comparar. |
 
-#### `mysql_generate_migration`
+#### `mysql_sync_migration`
 
-Genera un script SQL de migración para que la base destino iguale a la
-origen: `CREATE TABLE` de tablas faltantes, `ALTER TABLE` de columnas y
+Genera un script SQL para **sincronizar dos bases existentes** (diff de
+esquemas): `CREATE TABLE` de tablas faltantes, `ALTER TABLE` de columnas y
 `DROP` comentados por seguridad. Marca explícitamente las operaciones con
 posible **pérdida de datos** (⚠️) e incluye al final la **migración inversa
 (DOWN)** para revertir los cambios. Revísalo siempre antes de ejecutarlo.
+No confundir con `mysql_generate_migration_files`, que convierte UNA base en
+archivos de migración por tabla. (Nombre anterior:
+`mysql_generate_migration`, que sigue funcionando como alias.)
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -819,7 +825,7 @@ el DDL a C:\proyectos\mi-app\db-schema.
 ```text
 Compara los esquemas de mi_base_dev y mi_base_prod con
 mysql_compare_schemas y genera el script de sincronización con
-mysql_generate_migration. No lo ejecutes: solo muéstramelo.
+mysql_sync_migration. No lo ejecutes: solo muéstramelo.
 ```
 
 ## Desarrollo y tests
