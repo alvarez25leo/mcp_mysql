@@ -1661,8 +1661,10 @@ async function getTableSampleRows(
 // TOOL: mysql_generate_migration_files - Laravel-style ordered SQL migrations
 // ============================================================================
 
+// Migration file names are always lowercase (Laravel convention), even when
+// the table/object name is uppercase; the DDL inside keeps the real name.
 function sanitizeFileName(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]/g, "_");
+  return name.replace(/[^A-Za-z0-9_-]/g, "_").toLowerCase();
 }
 
 // DEFINER clauses break imports on servers where that user does not exist

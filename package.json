@@ -1,6 +1,6 @@
 {
   "name": "@benborla29/mcp-server-mysql",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "description": "MCP server for interacting with MySQL databases with write operations support",
   "license": "MIT",
   "author": "Ben Borla (https://github.com/benborla)",
