@@ -1,7 +1,7 @@
 # MySQL MCP Server
 
 Servidor MCP para trabajar con MySQL desde un cliente MCP o una IA.
-Permite consultar datos, inspeccionar esquema, exportar documentación y,
+Permite consultar datos, inspeccionar esquema, exportar el DDL y,
 si la configuración lo permite, ejecutar operaciones de escritura
 controladas.
 
@@ -11,7 +11,7 @@ controladas.
 - Soporta modo solo lectura o escritura controlada por variables de entorno.
 - Permite permisos por esquema/base de datos.
 - Soporta modo multi-DB.
-- Expone tools de diagnóstico, análisis, exportación y documentación para IA.
+- Expone tools de diagnóstico, análisis y exportación de esquema.
 
 ## Instalación
 
@@ -43,16 +43,11 @@ MYSQL_DB=tornadoexampleDB
 ENABLE_LOGGING=true
 ```
 
-Variables útiles para documentación:
+Variables útiles para exportación de esquema:
 
 ```env
-MYSQL_AI_DOCS_DIR=/Users/leonardo/Documents/tornado/docs
 MYSQL_SCHEMA_EXPORT_DIR=/Users/leonardo/Documents/tornado/db-schema
 MYSQL_SCHEMA_EXPORT_INCLUDE_SAMPLE_ROWS=true
-MYSQL_AI_DOCS_ENABLED=true
-MYSQL_AI_DOCS_OPENAI_API_KEY=sk-...
-MYSQL_AI_DOCS_OPENAI_MODEL=gpt-5
-MYSQL_AI_DOCS_TEMPLATE_PATH=/Users/leonardo/Documents/mcp/mysql/src/template/_template_example_sp.md
 ```
 
 Variables de permisos:
@@ -98,15 +93,13 @@ Uso típico:
 
 - `mysql_export_schema`: exporta el esquema a carpeta con `schema.sql`,
   `procedures/`, `functions/`, `views/`, `triggers/` y `events/`.
-- `mysql_document_function`: genera un `.md` profesional en español
-  para una function.
-- `mysql_document_view`: genera un `.md` profesional en español para una view.
 - `mysql_backup`: exporta datos de una tabla a `json` o `csv`.
 
 ### Comparación y migración
 
 - `mysql_compare_schemas`: compara dos esquemas.
 - `mysql_generate_migration`: genera SQL de migración entre dos esquemas.
+- `mysql_routine_impact`: muestra qué objetos referencian una rutina.
 
 ### Ejecución de lógica SQL
 
@@ -146,60 +139,17 @@ Ejemplo de argumentos:
 }
 ```
 
-### Documentación con IA
+### `mysql_export_schema`
 
-Los tools `mysql_document_function` y `mysql_document_view` aceptan
-`documentWithAi=true` para reescribir el Markdown generado con OpenAI
-usando el template configurado por env.
+Vuelca el DDL completo a disco: `schema.sql` más carpetas
+`procedures/`, `functions/`, `views/`, `triggers/` y `events/`.
 
-Variables usadas cuando `documentWithAi=true`:
-
-- `MYSQL_AI_DOCS_ENABLED`: si está en `true`, fuerza el uso de OpenAI aunque no envíes `documentWithAi` en el tool
-- `MYSQL_AI_DOCS_OPENAI_API_KEY` o `OPENAI_API_KEY`: token de OpenAI
-- `MYSQL_AI_DOCS_OPENAI_MODEL`: modelo a usar
-- `MYSQL_AI_DOCS_TEMPLATE_PATH`: template Markdown base. Si no se define, usa `src/template/_template_example_sp.md` para procedures/views y `src/template/_template_example_function.md` para functions
-
-### `mysql_document_function`
-
-Genera `docs/functions/NOMBRE.md` con:
-
-- propósito inferido
-- tipo de retorno
-- parámetros
-- tablas consultadas
-- análisis paso a paso
-- SQL fuente opcional
-
-Ejemplo:
+Ejemplo de argumentos:
 
 ```json
 {
-  "functionName": "FN_TOTAL_USUARIO",
   "database": "tornadoexampleDB",
-  "outputDir": "/Users/leonardo/Documents/tornado/docs",
-  "includeSourceSql": true
-}
-```
-
-### `mysql_document_view`
-
-Genera `docs/views/NOMBRE.md` con:
-
-- propósito inferido
-- columnas expuestas
-- tablas fuente
-- filas de ejemplo
-- análisis paso a paso
-- SQL fuente opcional
-
-Ejemplo:
-
-```json
-{
-  "viewName": "VW_USUARIOS_ACTIVOS",
-  "database": "tornadoexampleDB",
-  "outputDir": "/Users/leonardo/Documents/tornado/docs",
-  "includeSourceSql": true
+  "outputDir": "/Users/leonardo/Documents/tornado/db-schema"
 }
 ```
 
@@ -212,42 +162,34 @@ Usa mysql_data_dictionary sobre la base tornadoexampleDB en formato
 markdown para entender todas las tablas antes de hacer cambios.
 ```
 
-### Ejemplo 2: documentar una function
+### Ejemplo 2: revisar el impacto de una rutina
 
 ```text
-Usa mysql_document_function para documentar la function
-FN_TOTAL_USUARIO de la base tornadoexampleDB y guarda el archivo en
-/Users/leonardo/Documents/tornado/docs.
+Usa mysql_routine_impact sobre SP_LOGIN en la base tornadoexampleDB
+para ver qué procedures, functions y views la referencian antes de
+modificarla.
 ```
 
-### Ejemplo 3: generar documentación completa para contexto de IA
+### Ejemplo 3: dar contexto completo a otra IA
 
 ```text
-Quiero que documentes la base tornadoexampleDB para que otra IA la
-entienda. Primero usa mysql_data_dictionary en markdown. Luego
-documenta las functions con mysql_document_function y las views con
-mysql_document_view, guardando todo en
-/Users/leonardo/Documents/tornado/docs.
+Quiero que otra IA entienda la base tornadoexampleDB. Primero usa
+mysql_data_dictionary en markdown. Luego usa mysql_export_schema para
+volcar el DDL a /Users/leonardo/Documents/tornado/db-schema.
 ```
 
-## Flujo recomendado para documentar un sistema
+## Flujo recomendado para entender un sistema
 
 1. Ejecutar `mysql_data_dictionary` sobre toda la base.
 2. Ejecutar `mysql_export_schema` para guardar el esquema.
-3. Ejecutar `mysql_document_function` en functions relevantes.
-4. Ejecutar `mysql_document_view` en vistas usadas por reportes o dashboards.
+3. Ejecutar `mysql_show_views` en vistas usadas por reportes o dashboards.
+4. Ejecutar `mysql_routine_impact` antes de tocar cualquier rutina.
 
 ## Salidas esperadas
 
 Ejemplo de estructura final:
 
 ```text
-docs/
-  functions/
-    FN_TOTAL_USUARIO.md
-  views/
-    VW_USUARIOS_ACTIVOS.md
-
 db-schema/
   schema.sql
   procedures/
@@ -260,7 +202,7 @@ db-schema/
 
 ## Notas
 
-- La documentación generada es heurística: ayuda mucho a una IA,
+- El diccionario de datos es heurístico: ayuda mucho a una IA,
   pero no reemplaza revisión humana.
 - Si una rutina usa SQL dinámico, la detección de tablas puede no ser
   completa.
