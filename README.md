@@ -622,6 +622,53 @@ posible **pérdida de datos** (⚠️) e incluye al final la **migración invers
 | `sourceDb` | string | sí | Base origen (estado deseado). |
 | `targetDb` | string | sí | Base destino (la que se modificaría). |
 
+#### `mysql_generate_migration_files`
+
+Convierte el esquema en **migraciones estilo Laravel**: un archivo `.sql`
+por tabla con prefijo de fecha y secuencia
+(`2026_08_04_000001_create_users_table.sql`), **ordenados topológicamente
+por dependencias de foreign keys** — ejecutarlos en orden de nombre nunca
+falla. Casuísticas cubiertas:
+
+- Ciclos de FKs (A→B→A) y FKs hacia otras bases: las constraints afectadas
+  se retiran del `CREATE TABLE` y se difieren a un archivo final
+  `add_foreign_keys.sql` (con el motivo comentado).
+- FKs auto-referenciadas: se mantienen inline (no rompen el orden).
+- Genera también functions y procedures (antes de las vistas, porque una
+  vista puede usarlas), vistas ordenadas por dependencias entre vistas
+  (`CREATE OR REPLACE`), triggers y events, cada uno con `DROP IF EXISTS` y
+  bloques `DELIMITER`.
+- Elimina `DEFINER` (rompe al importar en otro servidor) y el contador
+  `AUTO_INCREMENT=N`; usa `CREATE TABLE IF NOT EXISTS` para que las
+  migraciones sean re-ejecutables.
+
+| Parámetro | Tipo | Requerido | Descripción |
+| --- | --- | --- | --- |
+| `database` | string | no | Base origen. Opcional si `MYSQL_DB` está configurada. |
+| `outputDir` | string | no | Carpeta destino. Opcional si `MYSQL_SCHEMA_EXPORT_DIR` está configurada (usa `<dir>/migrations`). |
+| `datePrefix` | string | no | Prefijo de fecha `YYYY_MM_DD`. Default: hoy. |
+| `startSequence` | number | no | Secuencia inicial (default 1 → `000001`). |
+| `ifNotExists` | boolean | no | `CREATE TABLE IF NOT EXISTS`. Default `true`. |
+| `includeViews` | boolean | no | Generar vistas. Default `true`. |
+| `includeRoutines` | boolean | no | Generar functions/procedures. Default `true`. |
+| `includeTriggers` | boolean | no | Generar triggers. Default `true`. |
+| `includeEvents` | boolean | no | Generar events. Default `true`. |
+| `stripDefiner` | boolean | no | Eliminar `DEFINER`. Default `true`. |
+| `stripAutoIncrement` | boolean | no | Eliminar `AUTO_INCREMENT=N`. Default `true`. |
+
+Devuelve el `executionOrder` completo (archivo, tipo y objeto en orden de
+ejecución), los ciclos detectados y las FKs diferidas. Emite progreso por
+tabla y soporta cancelación.
+
+Ejemplo de argumentos:
+
+```json
+{
+  "database": "onroad",
+  "outputDir": "C:\\proyectos\\onroad\\database\\migrations"
+}
+```
+
 ### Ejecución de lógica SQL
 
 #### `mysql_call_procedure`

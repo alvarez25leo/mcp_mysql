@@ -1658,6 +1658,578 @@ async function getTableSampleRows(
 }
 
 // ============================================================================
+// TOOL: mysql_generate_migration_files - Laravel-style ordered SQL migrations
+// ============================================================================
+
+function sanitizeFileName(name: string): string {
+  return name.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+// DEFINER clauses break imports on servers where that user does not exist
+function stripDefinerClause(sql: string): string {
+  return sql.replace(/DEFINER=`[^`]*`@`[^`]*`\s*/gi, "");
+}
+
+interface ExtractedForeignKey {
+  raw: string;
+  constraintName: string;
+  referencedSchema: string | null;
+  referencedTable: string;
+  definition: string;
+}
+
+// Parse CONSTRAINT ... FOREIGN KEY lines out of a SHOW CREATE TABLE DDL
+function extractForeignKeys(ddl: string): ExtractedForeignKey[] {
+  const results: ExtractedForeignKey[] = [];
+  const regex =
+    /^\s*CONSTRAINT\s+`((?:[^`]|``)+)`\s+FOREIGN KEY\s+\([^)]+\)\s+REFERENCES\s+(?:`((?:[^`]|``)+)`\.)?`((?:[^`]|``)+)`\s+\([^)]+\)[^,\r\n]*/gm;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(ddl)) !== null) {
+    results.push({
+      raw: match[0],
+      constraintName: match[1],
+      referencedSchema: match[2] ?? null,
+      referencedTable: match[3],
+      definition: match[0].trim().replace(/,\s*$/, ""),
+    });
+  }
+  return results;
+}
+
+// Remove specific constraint lines from a CREATE TABLE and fix the trailing
+// comma of the (new) last column/key definition
+function removeConstraintLines(ddl: string, rawLines: string[]): string {
+  const targets = new Set(
+    rawLines.map((raw) => raw.trim().replace(/,\s*$/, "")),
+  );
+  const lines = ddl
+    .split("\n")
+    .filter((line) => !targets.has(line.trim().replace(/,\s*$/, "")));
+  for (let i = 1; i < lines.length; i++) {
+    if (/^\)/.test(lines[i].trim())) {
+      lines[i - 1] = lines[i - 1].replace(/,\s*$/, "");
+    }
+  }
+  return lines.join("\n");
+}
+
+// Kahn topological sort with deterministic (alphabetical) tie-breaking.
+// On a cycle, the alphabetically-first remaining node is force-released and
+// reported, so its pending FKs can be deferred to a later migration file.
+function topologicalOrder(
+  nodes: string[],
+  dependencies: Map<string, Set<string>>,
+): { ordered: string[]; cycleNodes: string[] } {
+  const remaining = new Set(nodes);
+  const ordered: string[] = [];
+  const cycleNodes: string[] = [];
+
+  while (remaining.size > 0) {
+    const ready = [...remaining]
+      .filter(
+        (node) =>
+          ![...(dependencies.get(node) ?? [])].some(
+            (dep) => dep !== node && remaining.has(dep),
+          ),
+      )
+      .sort();
+
+    if (ready.length === 0) {
+      const forced = [...remaining].sort()[0];
+      cycleNodes.push(forced);
+      ready.push(forced);
+    }
+
+    for (const node of ready) {
+      ordered.push(node);
+      remaining.delete(node);
+    }
+  }
+
+  return { ordered, cycleNodes };
+}
+
+export async function mysqlGenerateMigrationFiles(
+  database?: string,
+  outputDir?: string,
+  options: {
+    datePrefix?: string;
+    startSequence?: number;
+    ifNotExists?: boolean;
+    includeViews?: boolean;
+    includeRoutines?: boolean;
+    includeTriggers?: boolean;
+    includeEvents?: boolean;
+    stripDefiner?: boolean;
+    stripAutoIncrement?: boolean;
+  } = {},
+  context?: ToolContext,
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+}> {
+  try {
+    const targetDatabase = database || process.env.MYSQL_DB;
+    if (!targetDatabase) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: database is required when MYSQL_DB is not configured",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const configuredDir =
+      process.env.MYSQL_SCHEMA_EXPORT_DIR ||
+      process.env.MYSQL_SCHEMA_EXPORT_PATH;
+    const baseDir = outputDir || (configuredDir ? path.join(configuredDir, "migrations") : undefined);
+    if (!baseDir) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: outputDir is required or set MYSQL_SCHEMA_EXPORT_DIR",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const {
+      datePrefix,
+      startSequence = 1,
+      ifNotExists = true,
+      includeViews = true,
+      includeRoutines = true,
+      includeTriggers = true,
+      includeEvents = true,
+      stripDefiner = true,
+      stripAutoIncrement = true,
+    } = options;
+
+    if (datePrefix && !/^\d{4}_\d{2}_\d{2}$/.test(datePrefix)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: datePrefix must use the format YYYY_MM_DD (e.g. 2026_08_04)",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const now = new Date();
+    const filePrefix =
+      datePrefix ||
+      `${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, "0")}_${String(now.getDate()).padStart(2, "0")}`;
+
+    const resolvedDir = path.resolve(baseDir);
+    fs.mkdirSync(resolvedDir, { recursive: true });
+
+    let sequence = Math.max(1, Math.trunc(startSequence));
+    const executionOrder: Array<{
+      file: string;
+      objectType: string;
+      name: string;
+    }> = [];
+    const warnings: string[] = [];
+    const usedFileNames = new Set<string>();
+
+    const nextFileName = (label: string): string => {
+      let candidate = `${filePrefix}_${String(sequence).padStart(6, "0")}_${label}.sql`;
+      sequence++;
+      while (usedFileNames.has(candidate)) {
+        candidate = `${filePrefix}_${String(sequence).padStart(6, "0")}_${label}.sql`;
+        sequence++;
+      }
+      usedFileNames.add(candidate);
+      return candidate;
+    };
+
+    const writeMigration = (
+      label: string,
+      objectType: string,
+      objectName: string,
+      body: string,
+    ): void => {
+      const fileName = nextFileName(label);
+      const header = [
+        `-- Migration: ${objectType} ${objectName}`,
+        `-- Database: ${targetDatabase}`,
+        `-- Generated: ${now.toISOString()}`,
+        "",
+      ].join("\n");
+      fs.writeFileSync(
+        path.join(resolvedDir, fileName),
+        `${header}${body.trimEnd()}\n`,
+        "utf8",
+      );
+      executionOrder.push({ file: fileName, objectType, name: objectName });
+    };
+
+    // ------------------------------------------------------------------
+    // 1. Tables: dependency graph from same-schema foreign keys
+    // ------------------------------------------------------------------
+    const tables = await executeQuery<any[]>(
+      `SELECT TABLE_NAME as name
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+       ORDER BY TABLE_NAME`,
+      [targetDatabase],
+    );
+    const tableNames = tables.map((row) => String(row.name));
+    const tableSet = new Set(tableNames);
+
+    const fkEdges = await executeQuery<any[]>(
+      `SELECT TABLE_NAME as child, REFERENCED_TABLE_NAME as parent,
+              REFERENCED_TABLE_SCHEMA as parentSchema
+       FROM information_schema.KEY_COLUMN_USAGE
+       WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL`,
+      [targetDatabase],
+    );
+
+    const dependencies = new Map<string, Set<string>>();
+    for (const edge of fkEdges) {
+      if (edge.parentSchema !== targetDatabase) continue; // cross-schema
+      const deps = dependencies.get(edge.child) ?? new Set<string>();
+      deps.add(String(edge.parent));
+      dependencies.set(edge.child, deps);
+    }
+
+    const { ordered, cycleNodes } = topologicalOrder(tableNames, dependencies);
+    if (cycleNodes.length > 0) {
+      warnings.push(
+        `Dependencias circulares de FK detectadas (${cycleNodes.join(", ")}): sus foreign keys pendientes se difieren al archivo final add_foreign_keys.`,
+      );
+    }
+
+    const createdSoFar = new Set<string>();
+    const deferredForeignKeys: Array<{
+      table: string;
+      constraintName: string;
+      alterSql: string;
+      reason: string;
+    }> = [];
+
+    let processed = 0;
+    for (const tableName of ordered) {
+      throwIfAborted(context);
+      processed++;
+      await context?.reportProgress?.(
+        processed,
+        ordered.length,
+        `Generando migración de ${tableName}`,
+      );
+
+      const createResult = await executeQuery<any[]>(
+        `SHOW CREATE TABLE ${escapeId(targetDatabase)}.${escapeId(tableName)}`,
+      );
+      let ddl: string =
+        createResult[0]?.["Create Table"] ||
+        createResult[0]?.["CREATE TABLE"] ||
+        "";
+      if (!ddl) {
+        warnings.push(`No se pudo obtener el DDL de la tabla ${tableName}.`);
+        continue;
+      }
+
+      // Defer FKs whose referenced table is not created yet (cycles) or
+      // lives in another schema — the CREATE would fail otherwise
+      const foreignKeys = extractForeignKeys(ddl);
+      const toDefer = foreignKeys.filter((fk) => {
+        if (fk.referencedSchema && fk.referencedSchema !== targetDatabase) {
+          return true;
+        }
+        const refTable = fk.referencedTable;
+        if (refTable === tableName) return false; // self-reference is fine
+        return tableSet.has(refTable) && !createdSoFar.has(refTable);
+      });
+
+      if (toDefer.length > 0) {
+        ddl = removeConstraintLines(
+          ddl,
+          toDefer.map((fk) => fk.raw),
+        );
+        for (const fk of toDefer) {
+          const reason =
+            fk.referencedSchema && fk.referencedSchema !== targetDatabase
+              ? `referencia a otra base (${fk.referencedSchema})`
+              : "dependencia circular";
+          deferredForeignKeys.push({
+            table: tableName,
+            constraintName: fk.constraintName,
+            alterSql: `ALTER TABLE ${escapeId(tableName)} ADD ${fk.definition};`,
+            reason,
+          });
+        }
+      }
+
+      if (stripAutoIncrement) {
+        ddl = ddl.replace(/\s+AUTO_INCREMENT=\d+/i, "");
+      }
+      if (ifNotExists) {
+        ddl = ddl.replace(/^CREATE TABLE /, "CREATE TABLE IF NOT EXISTS ");
+      }
+
+      writeMigration(
+        `create_${sanitizeFileName(tableName)}_table`,
+        "table",
+        tableName,
+        `${ddl};`,
+      );
+      createdSoFar.add(tableName);
+    }
+
+    // Deferred FKs in one final file, after every table exists
+    if (deferredForeignKeys.length > 0) {
+      const body = deferredForeignKeys
+        .map((fk) =>
+          [
+            `-- ${fk.table}.${fk.constraintName} (diferida: ${fk.reason})`,
+            fk.alterSql,
+          ].join("\n"),
+        )
+        .join("\n\n");
+      writeMigration(
+        "add_foreign_keys",
+        "foreign-keys",
+        `${deferredForeignKeys.length} constraints`,
+        body,
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // 2. Functions first (views may use them), then procedures
+    // ------------------------------------------------------------------
+    let functionsCount = 0;
+    let proceduresCount = 0;
+    if (includeRoutines) {
+      const routines = await executeQuery<any[]>(
+        `SELECT ROUTINE_NAME as name, ROUTINE_TYPE as type
+         FROM information_schema.ROUTINES
+         WHERE ROUTINE_SCHEMA = ?
+         ORDER BY ROUTINE_TYPE = 'PROCEDURE', ROUTINE_NAME`,
+        [targetDatabase],
+      );
+      for (const routine of routines) {
+        throwIfAborted(context);
+        const isFunction = routine.ROUTINE_TYPE === "FUNCTION" || routine.type === "FUNCTION";
+        const keyword = isFunction ? "FUNCTION" : "PROCEDURE";
+        const showResult = await executeQuery<any[]>(
+          `SHOW CREATE ${keyword} ${escapeId(targetDatabase)}.${escapeId(routine.name)}`,
+        ).catch(() => []);
+        let definition: string =
+          showResult[0]?.["Create Function"] ||
+          showResult[0]?.["Create Procedure"] ||
+          "";
+        if (!definition) {
+          warnings.push(
+            `No se pudo obtener la definición de ${keyword.toLowerCase()} ${routine.name} (¿permisos?).`,
+          );
+          continue;
+        }
+        if (stripDefiner) {
+          definition = stripDefinerClause(definition);
+        }
+        const body = buildDelimitedSqlBlock([
+          `DROP ${keyword} IF EXISTS ${escapeId(routine.name)}`,
+          definition,
+        ]);
+        writeMigration(
+          `create_${sanitizeFileName(routine.name)}_${keyword.toLowerCase()}`,
+          keyword.toLowerCase(),
+          routine.name,
+          body,
+        );
+        if (isFunction) functionsCount++;
+        else proceduresCount++;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Views, ordered by view-on-view dependencies
+    // ------------------------------------------------------------------
+    let viewsCount = 0;
+    if (includeViews) {
+      const viewRows = await executeQuery<any[]>(
+        `SELECT TABLE_NAME as name, VIEW_DEFINITION as definition
+         FROM information_schema.VIEWS
+         WHERE TABLE_SCHEMA = ?
+         ORDER BY TABLE_NAME`,
+        [targetDatabase],
+      );
+      const viewNames = viewRows.map((row) => String(row.name));
+      const viewDeps = new Map<string, Set<string>>();
+      for (const view of viewRows) {
+        const deps = new Set<string>();
+        for (const other of viewNames) {
+          if (other === view.name) continue;
+          if (
+            new RegExp(`(^|[^A-Za-z0-9_])\`?${escapeRegExp(other)}\`?([^A-Za-z0-9_]|$)`, "i").test(
+              String(view.definition ?? ""),
+            )
+          ) {
+            deps.add(other);
+          }
+        }
+        viewDeps.set(String(view.name), deps);
+      }
+      const viewOrder = topologicalOrder(viewNames, viewDeps);
+      if (viewOrder.cycleNodes.length > 0) {
+        warnings.push(
+          `Dependencias circulares entre vistas (${viewOrder.cycleNodes.join(", ")}): revisa el orden manualmente.`,
+        );
+      }
+
+      for (const viewName of viewOrder.ordered) {
+        throwIfAborted(context);
+        const showResult = await executeQuery<any[]>(
+          `SHOW CREATE VIEW ${escapeId(targetDatabase)}.${escapeId(viewName)}`,
+        ).catch(() => []);
+        let definition: string =
+          showResult[0]?.["Create View"] || showResult[0]?.["CREATE VIEW"] || "";
+        if (!definition) {
+          warnings.push(`No se pudo obtener la definición de la vista ${viewName}.`);
+          continue;
+        }
+        if (stripDefiner) {
+          definition = stripDefinerClause(definition);
+        }
+        definition = definition.replace(/^CREATE /, "CREATE OR REPLACE ");
+        writeMigration(
+          `create_${sanitizeFileName(viewName)}_view`,
+          "view",
+          viewName,
+          `${definition};`,
+        );
+        viewsCount++;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 4. Triggers (after their tables), then events
+    // ------------------------------------------------------------------
+    let triggersCount = 0;
+    if (includeTriggers) {
+      const triggers = await executeQuery<any[]>(
+        `SELECT TRIGGER_NAME as name
+         FROM information_schema.TRIGGERS
+         WHERE TRIGGER_SCHEMA = ?
+         ORDER BY EVENT_OBJECT_TABLE, TRIGGER_NAME`,
+        [targetDatabase],
+      );
+      for (const trigger of triggers) {
+        throwIfAborted(context);
+        const showResult = await executeQuery<any[]>(
+          `SHOW CREATE TRIGGER ${escapeId(targetDatabase)}.${escapeId(trigger.name)}`,
+        ).catch(() => []);
+        let definition: string =
+          showResult[0]?.["SQL Original Statement"] ||
+          showResult[0]?.["Create Trigger"] ||
+          "";
+        if (!definition) {
+          warnings.push(`No se pudo obtener la definición del trigger ${trigger.name}.`);
+          continue;
+        }
+        if (stripDefiner) {
+          definition = stripDefinerClause(definition);
+        }
+        const body = buildDelimitedSqlBlock([
+          `DROP TRIGGER IF EXISTS ${escapeId(trigger.name)}`,
+          definition,
+        ]);
+        writeMigration(
+          `create_${sanitizeFileName(trigger.name)}_trigger`,
+          "trigger",
+          trigger.name,
+          body,
+        );
+        triggersCount++;
+      }
+    }
+
+    let eventsCount = 0;
+    if (includeEvents) {
+      const events = await executeQuery<any[]>(
+        `SELECT EVENT_NAME as name
+         FROM information_schema.EVENTS
+         WHERE EVENT_SCHEMA = ?
+         ORDER BY EVENT_NAME`,
+        [targetDatabase],
+      );
+      for (const event of events) {
+        throwIfAborted(context);
+        const showResult = await executeQuery<any[]>(
+          `SHOW CREATE EVENT ${escapeId(targetDatabase)}.${escapeId(event.name)}`,
+        ).catch(() => []);
+        let definition: string = showResult[0]?.["Create Event"] || "";
+        if (!definition) {
+          warnings.push(`No se pudo obtener la definición del evento ${event.name}.`);
+          continue;
+        }
+        if (stripDefiner) {
+          definition = stripDefinerClause(definition);
+        }
+        const body = buildDelimitedSqlBlock([
+          `DROP EVENT IF EXISTS ${escapeId(event.name)}`,
+          definition,
+        ]);
+        writeMigration(
+          `create_${sanitizeFileName(event.name)}_event`,
+          "event",
+          event.name,
+          body,
+        );
+        eventsCount++;
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: targetDatabase,
+              outputDir: resolvedDir,
+              totalFiles: executionOrder.length,
+              tables: createdSoFar.size,
+              deferredForeignKeys: deferredForeignKeys.length,
+              functions: functionsCount,
+              procedures: proceduresCount,
+              views: viewsCount,
+              triggers: triggersCount,
+              events: eventsCount,
+              circularDependencies: cycleNodes,
+              executionOrder,
+              warnings,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+      isError: false,
+    };
+  } catch (error) {
+    log("error", "Error in mysql_generate_migration_files:", error);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: ${formatMysqlError(error)}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
+// ============================================================================
 // TOOL: mysql_compare_schemas - Compare two database schemas
 // ============================================================================
 
@@ -4254,6 +4826,25 @@ export const additionalToolDefinitions = [
     },
   },
   {
+    name: "mysql_generate_migration_files",
+    description:
+      "Genera migraciones SQL estilo Laravel: un archivo .sql por tabla con prefijo de fecha y secuencia (2026_08_04_000001_create_users_table.sql), ordenados topológicamente por dependencias de foreign keys para que ejecutarlos en orden de nombre nunca falle. Maneja ciclos de FKs y FKs a otras bases (se difieren a un archivo final add_foreign_keys), FKs auto-referenciadas, y genera también functions, procedures, vistas (ordenadas por dependencias entre vistas), triggers y events en el orden correcto. Elimina DEFINER y AUTO_INCREMENT para que los archivos sean portables. Usa este tool cuando el usuario pida 'migraciones por tabla', 'archivos de migración' o convertir el esquema a migraciones.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        database: {
+          type: "string",
+          description: "Base de datos origen. Opcional si MYSQL_DB está configurada.",
+        },
+        outputDir: {
+          type: "string",
+          description:
+            "Carpeta destino de los archivos. Opcional si MYSQL_SCHEMA_EXPORT_DIR está configurada (usa <dir>/migrations).",
+        },
+      },
+    },
+  },
+  {
     name: "mysql_query_history",
     description:
       "View or clear the history of executed queries in the current session. Use this tool to review what queries have been run, check execution times, see which queries failed, or debug issues. The history includes SQL statements, execution duration, row counts, and success/failure status. History is stored in-memory and cleared when the session ends.",
@@ -4686,6 +5277,24 @@ export async function handleAdditionalTool(
 
     case "mysql_generate_migration":
       return mysqlGenerateMigration(args.sourceDb, args.targetDb);
+
+    case "mysql_generate_migration_files":
+      return mysqlGenerateMigrationFiles(
+        args.database,
+        args.outputDir,
+        {
+          datePrefix: args.datePrefix,
+          startSequence: args.startSequence,
+          ifNotExists: args.ifNotExists,
+          includeViews: args.includeViews,
+          includeRoutines: args.includeRoutines,
+          includeTriggers: args.includeTriggers,
+          includeEvents: args.includeEvents,
+          stripDefiner: args.stripDefiner,
+          stripAutoIncrement: args.stripAutoIncrement,
+        },
+        context,
+      );
 
     case "mysql_query_history":
       if (args.clear) {

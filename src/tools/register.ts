@@ -866,6 +866,82 @@ export function registerAllTools(
     READ_ONLY,
   );
 
+  registerDispatchedTool(
+    server,
+    "mysql_generate_migration_files",
+    "Generate migration files (one per table)",
+    {
+      database: z
+        .string()
+        .optional()
+        .describe("Base de datos origen. Opcional si MYSQL_DB está configurada."),
+      outputDir: z
+        .string()
+        .optional()
+        .describe(
+          "Carpeta destino. Opcional si MYSQL_SCHEMA_EXPORT_DIR está configurada (usa <dir>/migrations).",
+        ),
+      datePrefix: z
+        .string()
+        .regex(/^\d{4}_\d{2}_\d{2}$/)
+        .optional()
+        .describe("Prefijo de fecha de los archivos (YYYY_MM_DD). Default: hoy."),
+      startSequence: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Número de secuencia inicial (default 1 → 000001)."),
+      ifNotExists: z
+        .boolean()
+        .optional()
+        .describe("Usar CREATE TABLE IF NOT EXISTS para migraciones re-ejecutables. Default: true."),
+      includeViews: z.boolean().optional().describe("Generar vistas. Default: true."),
+      includeRoutines: z
+        .boolean()
+        .optional()
+        .describe("Generar functions y procedures. Default: true."),
+      includeTriggers: z.boolean().optional().describe("Generar triggers. Default: true."),
+      includeEvents: z.boolean().optional().describe("Generar events. Default: true."),
+      stripDefiner: z
+        .boolean()
+        .optional()
+        .describe("Eliminar cláusulas DEFINER (portabilidad entre servidores). Default: true."),
+      stripAutoIncrement: z
+        .boolean()
+        .optional()
+        .describe("Eliminar el contador AUTO_INCREMENT=N del DDL. Default: true."),
+    },
+    {
+      database: z.string().optional(),
+      outputDir: z.string().optional(),
+      totalFiles: z.number().optional(),
+      tables: z.number().optional(),
+      deferredForeignKeys: z
+        .number()
+        .optional()
+        .describe("FKs movidas al archivo final add_foreign_keys (ciclos / otras bases)"),
+      functions: z.number().optional(),
+      procedures: z.number().optional(),
+      views: z.number().optional(),
+      triggers: z.number().optional(),
+      events: z.number().optional(),
+      circularDependencies: z.array(z.string()).optional(),
+      executionOrder: z
+        .array(
+          z.object({
+            file: z.string(),
+            objectType: z.string(),
+            name: z.string(),
+          }),
+        )
+        .optional()
+        .describe("Archivos generados en el orden exacto de ejecución"),
+      warnings: z.array(z.string()).optional(),
+    },
+    WRITES_DATA,
+  );
+
   // ==========================================================================
   // SQL logic execution (write / destructive)
   // ==========================================================================
