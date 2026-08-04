@@ -98,8 +98,6 @@ Uso típico:
 
 - `mysql_export_schema`: exporta el esquema a carpeta con `schema.sql`,
   `procedures/`, `functions/`, `views/`, `triggers/` y `events/`.
-- `mysql_document_procedure`: genera un `.md` profesional en español
-  para un stored procedure.
 - `mysql_document_function`: genera un `.md` profesional en español
   para una function.
 - `mysql_document_view`: genera un `.md` profesional en español para una view.
@@ -148,30 +146,11 @@ Ejemplo de argumentos:
 }
 ```
 
-### `mysql_document_procedure`
+### Documentación con IA
 
-Genera `docs/procedures/NOMBRE.md` en español con:
-
-- resumen ejecutivo
-- propósito inferido
-- parámetros
-- tablas con las que interactúa
-- filas de ejemplo
-- análisis paso a paso del SQL
-- SQL fuente opcional
-- y, si `documentWithAi=true`, lo reescribe con OpenAI usando el template configurado por env
-
-Ejemplo:
-
-```json
-{
-  "procedureName": "SP_LOGIN",
-  "database": "tornadoexampleDB",
-  "outputDir": "/Users/leonardo/Documents/tornado/docs",
-  "includeSourceSql": true,
-  "documentWithAi": true
-}
-```
+Los tools `mysql_document_function` y `mysql_document_view` aceptan
+`documentWithAi=true` para reescribir el Markdown generado con OpenAI
+usando el template configurado por env.
 
 Variables usadas cuando `documentWithAi=true`:
 
@@ -233,11 +212,11 @@ Usa mysql_data_dictionary sobre la base tornadoexampleDB en formato
 markdown para entender todas las tablas antes de hacer cambios.
 ```
 
-### Ejemplo 2: documentar un procedure
+### Ejemplo 2: documentar una function
 
 ```text
-Usa mysql_document_procedure para documentar el stored procedure
-SP_LOGIN de la base tornadoexampleDB y guarda el archivo en
+Usa mysql_document_function para documentar la function
+FN_TOTAL_USUARIO de la base tornadoexampleDB y guarda el archivo en
 /Users/leonardo/Documents/tornado/docs.
 ```
 
@@ -246,8 +225,7 @@ SP_LOGIN de la base tornadoexampleDB y guarda el archivo en
 ```text
 Quiero que documentes la base tornadoexampleDB para que otra IA la
 entienda. Primero usa mysql_data_dictionary en markdown. Luego
-documenta los procedures importantes con mysql_document_procedure,
-las functions con mysql_document_function y las views con
+documenta las functions con mysql_document_function y las views con
 mysql_document_view, guardando todo en
 /Users/leonardo/Documents/tornado/docs.
 ```
@@ -256,9 +234,8 @@ mysql_document_view, guardando todo en
 
 1. Ejecutar `mysql_data_dictionary` sobre toda la base.
 2. Ejecutar `mysql_export_schema` para guardar el esquema.
-3. Ejecutar `mysql_document_procedure` en procedures críticos.
-4. Ejecutar `mysql_document_function` en functions relevantes.
-5. Ejecutar `mysql_document_view` en vistas usadas por reportes o dashboards.
+3. Ejecutar `mysql_document_function` en functions relevantes.
+4. Ejecutar `mysql_document_view` en vistas usadas por reportes o dashboards.
 
 ## Salidas esperadas
 
@@ -266,9 +243,6 @@ Ejemplo de estructura final:
 
 ```text
 docs/
-  procedures/
-    SP_LOGIN.md
-    SP_CREATE_USER.md
   functions/
     FN_TOTAL_USUARIO.md
   views/
