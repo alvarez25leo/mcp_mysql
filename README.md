@@ -57,7 +57,18 @@ ALLOW_INSERT_OPERATION=false
 ALLOW_UPDATE_OPERATION=false
 ALLOW_DELETE_OPERATION=false
 ALLOW_DDL_OPERATION=false
+# Operaciones administrativas (KILL, SET de variables). Off por defecto.
+ALLOW_ADMIN_OPERATION=false
+# En modo multi-DB las escrituras están bloqueadas salvo que actives esto.
+MULTI_DB_WRITE_MODE=false
 ```
+
+Notas de permisos:
+
+- `mysql_create_procedure` y `mysql_alter_procedure` requieren permiso DDL
+  (`ALLOW_DDL_OPERATION` o `SCHEMA_DDL_PERMISSIONS`).
+- `mysql_kill_process` y `mysql_variables` con `action=set` requieren
+  `ALLOW_ADMIN_OPERATION=true`.
 
 ## Tool principal
 
@@ -66,12 +77,25 @@ ALLOW_DDL_OPERATION=false
 Ejecuta cualquier SQL. Si la consulta es de escritura, el servidor valida
 permisos antes de ejecutarla.
 
+Parámetros:
+
+- `sql`: la sentencia a ejecutar.
+- `params` (opcional): valores para placeholders `?` (prepared statement).
+  Preferible a concatenar valores en el SQL.
+- `maxRows` (opcional): máximo de filas a devolver (500 por defecto).
+  Los resultados truncados se marcan con `truncated: true`.
+
 Uso típico:
 
 - consultas `SELECT`
 - `SHOW TABLES`
 - `CALL procedure(...)`
 - `ALTER TABLE` si está permitido
+
+Todas las tools usan la API moderna del SDK MCP (`registerTool`): inputs
+validados con Zod, `title` y `annotations` (readOnly/destructive) por tool,
+y resultados con `structuredContent` además del texto. `mysql_query` además
+declara `outputSchema` con filas, conteos y metadatos de la operación.
 
 ## Tools disponibles
 
@@ -103,15 +127,24 @@ Uso típico:
 
 ### Ejecución de lógica SQL
 
-- `mysql_call_procedure`: ejecuta un stored procedure.
-- `mysql_create_procedure`: crea un stored procedure.
-- `mysql_alter_procedure`: recrea/modifica un stored procedure.
+- `mysql_call_procedure`: ejecuta un stored procedure. Soporta parámetros
+  OUT/INOUT vía `outParams: ["nombre"]` (se devuelven tras la llamada).
+- `mysql_create_procedure`: crea un stored procedure (requiere permiso DDL).
+- `mysql_alter_procedure`: recrea/modifica un stored procedure (requiere
+  permiso DDL; si el CREATE falla restaura la definición anterior).
 - `mysql_alter_table`: ejecuta `ALTER TABLE`.
 
-### Administración
+### Administración (requiere `ALLOW_ADMIN_OPERATION=true`)
 
-- `mysql_variables`: muestra o cambia variables de MySQL.
-- `mysql_kill_process`: mata un proceso por ID.
+- `mysql_variables`: muestra o cambia variables de MySQL (`set` requiere el
+  permiso admin; `show` siempre disponible).
+- `mysql_kill_process`: mata un proceso por ID. Con `mode: "query"` aborta
+  solo la sentencia en ejecución sin cerrar la conexión.
+
+### Notas de `mysql_explain`
+
+`EXPLAIN ANALYZE` ejecuta la query real, por eso ahora es opt-in con
+`analyze: true` y solo se aplica a `SELECT`.
 
 ## Tools de documentación para IA
 
