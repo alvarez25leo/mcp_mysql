@@ -4,9 +4,27 @@
  */
 
 import { executeQuery, executeReadOnlyQuery, getPool } from "../db/index.js";
-import { log } from "../utils/index.js";
+import { isDDLAllowedForSchema } from "../db/permissions.js";
+import { ALLOW_ADMIN_OPERATION } from "../config/index.js";
+import { log, escapeId } from "../utils/index.js";
 import * as fs from "fs";
 import * as path from "path";
+
+// Standard error result shared by permission gates
+function permissionError(message: string): {
+  content: Array<{ type: string; text: string }>;
+  isError: boolean;
+} {
+  return {
+    content: [{ type: "text", text: `Error: ${message}` }],
+    isError: true,
+  };
+}
+
+// Resolve the schema a DDL-like tool call targets, for permission checks
+function resolveSchema(database?: string): string | null {
+  return database || process.env.MYSQL_DB || null;
+}
 
 // Query history storage (in-memory for session)
 const queryHistory: Array<{
@@ -141,6 +159,7 @@ function prependSqlHeader(content: string, header: string): string {
 export async function mysqlExplain(
   sql: string,
   format: "traditional" | "json" | "tree" = "traditional",
+  analyze: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -179,10 +198,13 @@ export async function mysqlExplain(
 
     const result = await executeQuery<any[]>(explainSql);
 
-    // Also get extended information
-    const analyzeResult = await executeQuery<any[]>(
-      `EXPLAIN ANALYZE ${sql}`,
-    ).catch(() => null);
+    // EXPLAIN ANALYZE actually EXECUTES the statement, so it is opt-in and
+    // restricted to SELECT: running it on UPDATE/DELETE would apply the write
+    // and bypass the permission layer.
+    const analyzeResult =
+      analyze && normalizedSql.startsWith("SELECT")
+        ? await executeQuery<any[]>(`EXPLAIN ANALYZE ${sql}`).catch(() => null)
+        : null;
 
     let response = {
       explainPlan: result,
@@ -266,8 +288,8 @@ export async function mysqlDescribe(
 }> {
   try {
     const fullTableName = database
-      ? `\`${database}\`.\`${table}\``
-      : `\`${table}\``;
+      ? `${escapeId(database)}.${escapeId(table)}`
+      : escapeId(table);
 
     // Get table structure
     const columns = await executeQuery<any[]>(`DESCRIBE ${fullTableName}`);
@@ -282,11 +304,24 @@ export async function mysqlDescribe(
       `SHOW CREATE TABLE ${fullTableName}`,
     );
 
-    // Get table status
-    const statusQuery = database
-      ? `SHOW TABLE STATUS FROM \`${database}\` LIKE '${table}'`
-      : `SHOW TABLE STATUS LIKE '${table}'`;
-    const status = await executeQuery<any[]>(statusQuery);
+    // Get table status via information_schema (parameterized — SHOW TABLE
+    // STATUS LIKE cannot take placeholders and was injectable)
+    const statusQuery = `
+      SELECT
+        ENGINE as Engine,
+        TABLE_ROWS as \`Rows\`,
+        DATA_LENGTH as Data_length,
+        INDEX_LENGTH as Index_length,
+        AUTO_INCREMENT as Auto_increment,
+        CREATE_TIME as Create_time,
+        UPDATE_TIME as Update_time,
+        TABLE_COLLATION as Collation
+      FROM information_schema.TABLES
+      WHERE TABLE_NAME = ?
+        AND TABLE_SCHEMA = ${database ? "?" : "DATABASE()"}
+      LIMIT 1`;
+    const statusParams = database ? [table, database] : [table];
+    const status = await executeQuery<any[]>(statusQuery, statusParams);
 
     // Get foreign keys
     const fkQuery = `
@@ -689,8 +724,17 @@ export async function mysqlBackup(
 }> {
   try {
     const fullTableName = database
-      ? `\`${database}\`.\`${table}\``
-      : `\`${table}\``;
+      ? `${escapeId(database)}.${escapeId(table)}`
+      : escapeId(table);
+
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 0)) {
+      return {
+        content: [
+          { type: "text", text: "Error: limit must be a non-negative integer" },
+        ],
+        isError: true,
+      };
+    }
 
     let sql = `SELECT * FROM ${fullTableName}`;
     if (whereClause) {
@@ -1123,9 +1167,11 @@ async function getTableSampleRows(
     const orderByColumn =
       autoIncrementColumn || primaryKeyColumn || timestampColumn;
 
+    const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : 3;
+    const qualifiedTable = `${escapeId(database)}.${escapeId(table)}`;
     const sampleSql = orderByColumn
-      ? `SELECT * FROM \`${database}\`.\`${table}\` ORDER BY \`${orderByColumn}\` DESC LIMIT ${limit}`
-      : `SELECT * FROM \`${database}\`.\`${table}\` LIMIT ${limit}`;
+      ? `SELECT * FROM ${qualifiedTable} ORDER BY ${escapeId(orderByColumn)} DESC LIMIT ${safeLimit}`
+      : `SELECT * FROM ${qualifiedTable} LIMIT ${safeLimit}`;
 
     return await executeQuery<any[]>(sampleSql);
   } catch (error) {
@@ -1257,6 +1303,71 @@ export async function mysqlCompareSchemas(
       ) {
         differences.columnDifferences.push(tableDiff);
       }
+
+      // Compare indexes (grouped by index name: column list + uniqueness)
+      const loadIndexes = async (db: string) => {
+        const rows = await executeQuery<any[]>(
+          `SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME
+           FROM information_schema.STATISTICS
+           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+           ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
+          [db, table],
+        );
+        const map = new Map<string, { unique: boolean; columns: string[] }>();
+        for (const row of rows) {
+          const entry = map.get(row.INDEX_NAME) || {
+            unique: row.NON_UNIQUE === 0,
+            columns: [],
+          };
+          entry.columns.push(row.COLUMN_NAME);
+          map.set(row.INDEX_NAME, entry);
+        }
+        return map;
+      };
+
+      const sourceIndexes = await loadIndexes(sourceDb);
+      const targetIndexes = await loadIndexes(targetDb);
+
+      const indexDiff: any = {
+        table,
+        indexesOnlyInSource: [] as any[],
+        indexesOnlyInTarget: [] as string[],
+        indexDefinitionDifferences: [] as any[],
+      };
+
+      for (const [indexName, sourceIndex] of sourceIndexes) {
+        const targetIndex = targetIndexes.get(indexName);
+        if (!targetIndex) {
+          indexDiff.indexesOnlyInSource.push({
+            name: indexName,
+            unique: sourceIndex.unique,
+            columns: sourceIndex.columns,
+          });
+        } else if (
+          sourceIndex.unique !== targetIndex.unique ||
+          sourceIndex.columns.join(",") !== targetIndex.columns.join(",")
+        ) {
+          indexDiff.indexDefinitionDifferences.push({
+            name: indexName,
+            source: sourceIndex,
+            target: targetIndex,
+          });
+        }
+      }
+
+      for (const indexName of targetIndexes.keys()) {
+        if (!sourceIndexes.has(indexName)) {
+          indexDiff.indexesOnlyInTarget.push(indexName);
+        }
+      }
+
+      if (
+        indexDiff.indexesOnlyInSource.length > 0 ||
+        indexDiff.indexesOnlyInTarget.length > 0 ||
+        indexDiff.indexDefinitionDifferences.length > 0
+      ) {
+        differences.indexDifferences.push(indexDiff);
+      }
     }
 
     differences.summary.tablesOnlyInSource =
@@ -1265,6 +1376,8 @@ export async function mysqlCompareSchemas(
       differences.tablesOnlyInTarget.length;
     differences.summary.tablesWithColumnDifferences =
       differences.columnDifferences.length;
+    differences.summary.tablesWithIndexDifferences =
+      differences.indexDifferences.length;
 
     return {
       content: [{ type: "text", text: JSON.stringify(differences, null, 2) }],
@@ -1316,12 +1429,18 @@ export async function mysqlGenerateMigration(
 
       for (const table of diff.tablesOnlyInSource) {
         const createStmt = await executeQuery<any[]>(
-          `SHOW CREATE TABLE \`${sourceDb}\`.\`${table}\``,
+          `SHOW CREATE TABLE ${escapeId(sourceDb)}.${escapeId(table)}`,
         );
         if (createStmt[0]) {
-          let createSql = createStmt[0]["Create Table"];
-          // Replace database name if present
-          createSql = createSql.replace(new RegExp(sourceDb, "g"), targetDb);
+          let createSql: string = createStmt[0]["Create Table"];
+          // Qualify only the table name in the CREATE TABLE header with the
+          // target database. A global source→target name replace corrupted
+          // column names, comments and defaults that contained the DB name.
+          createSql = createSql.replace(
+            /^CREATE TABLE `((?:[^`]|``)+)`/,
+            (_match, tableName) =>
+              `CREATE TABLE ${escapeId(targetDb)}.\`${tableName}\``,
+          );
           migrations.push(`-- Create table: ${table}`);
           migrations.push(createSql + ";\n");
         }
@@ -1423,15 +1542,36 @@ export async function mysqlCallProcedure(
   procedureName: string,
   params: any[] = [],
   database?: string,
+  outParams: string[] = [],
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
     const fullProcName = database
-      ? `\`${database}\`.\`${procedureName}\``
-      : `\`${procedureName}\``;
-    const placeholders = params.map(() => "?").join(", ");
+      ? `${escapeId(database)}.${escapeId(procedureName)}`
+      : escapeId(procedureName);
+
+    // OUT/INOUT parameters are mapped to MySQL user variables (@name) appended
+    // after the positional IN parameters, then read back with a SELECT.
+    for (const name of outParams) {
+      if (!/^[a-zA-Z0-9_]+$/.test(name)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: invalid OUT parameter name '${name}'. Only alphanumeric characters and underscore are allowed.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    const placeholders = [
+      ...params.map(() => "?"),
+      ...outParams.map((name) => `@${name}`),
+    ].join(", ");
     const sql = `CALL ${fullProcName}(${placeholders})`;
 
     log("info", `Executing stored procedure: ${sql}`, params);
@@ -1442,9 +1582,26 @@ export async function mysqlCallProcedure(
     try {
       const [results] = await connection.query(sql, params);
 
+      let outValues: Record<string, unknown> | null = null;
+      if (outParams.length > 0) {
+        const selectOut = `SELECT ${outParams
+          .map((name) => `@${name} AS ${escapeId(name)}`)
+          .join(", ")}`;
+        const [outRows] = await connection.query(selectOut);
+        outValues = Array.isArray(outRows) ? (outRows[0] as any) : null;
+      }
+
       return {
         content: [
           { type: "text", text: JSON.stringify(results, null, 2) },
+          ...(outValues
+            ? [
+                {
+                  type: "text",
+                  text: `\nOUT parameters: ${JSON.stringify(outValues, null, 2)}`,
+                },
+              ]
+            : []),
           {
             type: "text",
             text: `\n--- Procedure ${procedureName} executed successfully ---`,
@@ -1484,8 +1641,8 @@ export async function mysqlShowViews(
     if (viewName) {
       // Get specific view details
       const fullViewName = database
-        ? `\`${database}\`.\`${viewName}\``
-        : `\`${viewName}\``;
+        ? `${escapeId(database)}.${escapeId(viewName)}`
+        : escapeId(viewName);
 
       const viewDef = await executeQuery<any[]>(
         `SHOW CREATE VIEW ${fullViewName}`,
@@ -2041,6 +2198,12 @@ export async function mysqlVariables(
 }> {
   try {
     if (action === "set") {
+      if (!ALLOW_ADMIN_OPERATION) {
+        return permissionError(
+          "Setting MySQL variables is not allowed. Set ALLOW_ADMIN_OPERATION=true to enable it.",
+        );
+      }
+
       if (!variable || value === undefined) {
         return {
           content: [
@@ -2074,7 +2237,11 @@ export async function mysqlVariables(
         content: [
           {
             type: "text",
-            text: `Successfully set ${scope} variable '${variable}' to '${value}'`,
+            text:
+              `Successfully set ${scope} variable '${variable}' to '${value}'` +
+              (scope === "session"
+                ? "\nWarning: SESSION variables are set on one pooled connection only and do not persist for subsequent queries. Use scope 'global' for persistent changes."
+                : ""),
           },
         ],
         isError: false,
@@ -2574,11 +2741,20 @@ export async function mysqlProcessList(full: boolean = false): Promise<{
 // TOOL: mysql_kill_process - Kill a running process
 // ============================================================================
 
-export async function mysqlKillProcess(processId: number): Promise<{
+export async function mysqlKillProcess(
+  processId: number,
+  mode: "connection" | "query" = "connection",
+): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
+    if (!ALLOW_ADMIN_OPERATION) {
+      return permissionError(
+        "Killing processes is not allowed. Set ALLOW_ADMIN_OPERATION=true to enable it.",
+      );
+    }
+
     // Validate processId is a positive integer
     if (!Number.isInteger(processId) || processId <= 0) {
       return {
@@ -2592,11 +2768,19 @@ export async function mysqlKillProcess(processId: number): Promise<{
       };
     }
 
-    // Use parameterized query for safety
-    await executeQuery(`KILL ?`, [processId.toString()]);
+    // KILL does not accept string placeholders (KILL '123' is a syntax
+    // error), so interpolate the already-validated integer directly.
+    // KILL QUERY aborts only the running statement; KILL (CONNECTION)
+    // terminates the whole connection.
+    const killSql =
+      mode === "query" ? `KILL QUERY ${processId}` : `KILL ${processId}`;
+    await executeQuery(killSql);
     return {
       content: [
-        { type: "text", text: `Successfully killed process ${processId}` },
+        {
+          type: "text",
+          text: `Successfully killed ${mode === "query" ? "query of process" : "process"} ${processId}`,
+        },
       ],
       isError: false,
     };
@@ -2639,9 +2823,16 @@ export async function mysqlCreateProcedure(
   isError: boolean;
 }> {
   try {
+    const targetSchema = resolveSchema(database);
+    if (!isDDLAllowedForSchema(targetSchema)) {
+      return permissionError(
+        `DDL operations are not allowed for schema '${targetSchema || "default"}'. Configure ALLOW_DDL_OPERATION or SCHEMA_DDL_PERMISSIONS.`,
+      );
+    }
+
     const fullProcName = database
-      ? `\`${database}\`.\`${procedureName}\``
-      : `\`${procedureName}\``;
+      ? `${escapeId(database)}.${escapeId(procedureName)}`
+      : escapeId(procedureName);
 
     // Build CREATE PROCEDURE statement
     let createSql = `CREATE PROCEDURE ${fullProcName}`;
@@ -2771,9 +2962,16 @@ export async function mysqlAlterProcedure(
   isError: boolean;
 }> {
   try {
+    const targetSchema = resolveSchema(database);
+    if (!isDDLAllowedForSchema(targetSchema)) {
+      return permissionError(
+        `DDL operations are not allowed for schema '${targetSchema || "default"}'. Configure ALLOW_DDL_OPERATION or SCHEMA_DDL_PERMISSIONS.`,
+      );
+    }
+
     const fullProcName = database
-      ? `\`${database}\`.\`${procedureName}\``
-      : `\`${procedureName}\``;
+      ? `${escapeId(database)}.${escapeId(procedureName)}`
+      : escapeId(procedureName);
 
     // Build CREATE PROCEDURE statement (same as create)
     let createSql = `CREATE PROCEDURE ${fullProcName}`;
@@ -2817,6 +3015,21 @@ export async function mysqlAlterProcedure(
     const connection = await pool.getConnection();
 
     try {
+      // Capture the current definition so the procedure can be restored if
+      // the CREATE fails after the DROP (otherwise it would be lost).
+      let previousDefinition: string | null = null;
+      try {
+        const showResult = await connection.query(
+          `SHOW CREATE PROCEDURE ${fullProcName}`,
+        );
+        const showRows = Array.isArray(showResult)
+          ? (showResult[0] as any[])
+          : [];
+        previousDefinition = showRows?.[0]?.["Create Procedure"] || null;
+      } catch {
+        // Procedure may not exist yet
+      }
+
       // Drop existing procedure
       const dropSql = `DROP PROCEDURE ${ifExists ? "IF EXISTS" : ""} ${fullProcName}`;
       try {
@@ -2828,8 +3041,27 @@ export async function mysqlAlterProcedure(
         // If IF EXISTS and procedure doesn't exist, continue
       }
 
-      // Create new procedure
-      await connection.query(createSql);
+      // Create new procedure; on failure, restore the previous definition
+      try {
+        await connection.query(createSql);
+      } catch (createError) {
+        if (previousDefinition) {
+          try {
+            await connection.query(previousDefinition);
+            log(
+              "info",
+              `CREATE failed; restored previous definition of ${procedureName}`,
+            );
+          } catch (restoreError) {
+            log(
+              "error",
+              `CREATE failed and restore also failed for ${procedureName}:`,
+              restoreError,
+            );
+          }
+        }
+        throw createError;
+      }
 
       return {
         content: [
@@ -2884,8 +3116,8 @@ export async function mysqlAlterTable(
     }
 
     const fullTableName = database
-      ? `\`${database}\`.\`${table}\``
-      : `\`${table}\``;
+      ? `${escapeId(database)}.${escapeId(table)}`
+      : escapeId(table);
     const sql = `ALTER TABLE ${fullTableName} ${alterStatement}`;
 
     log("info", `Executing ALTER TABLE: ${sql}`);
@@ -3499,7 +3731,7 @@ export async function handleAdditionalTool(
 } | null> {
   switch (toolName) {
     case "mysql_explain":
-      return mysqlExplain(args.sql, args.format);
+      return mysqlExplain(args.sql, args.format, args.analyze);
 
     case "mysql_describe":
       return mysqlDescribe(args.table, args.database);
@@ -3557,6 +3789,7 @@ export async function handleAdditionalTool(
         args.procedureName,
         args.params || [],
         args.database,
+        args.outParams || [],
       );
 
     case "mysql_show_views":
@@ -3592,7 +3825,7 @@ export async function handleAdditionalTool(
       return mysqlProcessList(args.full);
 
     case "mysql_kill_process":
-      return mysqlKillProcess(args.processId);
+      return mysqlKillProcess(args.processId, args.mode);
 
     case "mysql_create_procedure":
       return mysqlCreateProcedure(

@@ -106,7 +106,10 @@ describe("Query Functions", () => {
         "SET SESSION TRANSACTION READ ONLY",
       );
       expect(mockConnection.beginTransaction).toHaveBeenCalled();
-      expect(mockConnection.query).toHaveBeenCalledWith("SELECT * FROM test");
+      expect(mockConnection.query).toHaveBeenCalledWith(
+        "SELECT * FROM test",
+        [],
+      );
       expect(mockConnection.rollback).toHaveBeenCalled();
       expect(mockConnection.query).toHaveBeenCalledWith(
         "SET SESSION TRANSACTION READ WRITE",
@@ -120,6 +123,12 @@ describe("Query Functions", () => {
             text: JSON.stringify(mockResults, null, 2),
           },
         ],
+        structured: {
+          rows: mockResults,
+          rowCount: 1,
+          returnedRows: 1,
+          truncated: false,
+        },
         isError: false,
       });
     });
@@ -174,6 +183,7 @@ describe("Query Functions", () => {
       expect(mockConnection.beginTransaction).toHaveBeenCalled();
       expect(mockConnection.query).toHaveBeenCalledWith(
         'INSERT INTO test (name) VALUES ("test")',
+        [],
       );
       expect(mockConnection.commit).toHaveBeenCalled();
       expect(mockConnection.release).toHaveBeenCalled();
@@ -196,6 +206,7 @@ describe("Query Functions", () => {
       expect(mockConnection.beginTransaction).toHaveBeenCalled();
       expect(mockConnection.query).toHaveBeenCalledWith(
         'UPDATE test SET name = "updated" WHERE id > 0',
+        [],
       );
       expect(mockConnection.commit).toHaveBeenCalled();
 
@@ -215,6 +226,7 @@ describe("Query Functions", () => {
       expect(mockConnection.beginTransaction).toHaveBeenCalled();
       expect(mockConnection.query).toHaveBeenCalledWith(
         "DELETE FROM test WHERE id > 0",
+        [],
       );
       expect(mockConnection.commit).toHaveBeenCalled();
 

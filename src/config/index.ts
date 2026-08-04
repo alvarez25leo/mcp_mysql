@@ -2,7 +2,7 @@ import * as dotenv from "dotenv";
 import { SchemaPermissions } from "../types/index.js";
 import { parseSchemaPermissions, parseMySQLConnectionString } from "../utils/index.js";
 
-export const MCP_VERSION = "2.0.7";
+export const MCP_VERSION = "2.1.0";
 
 // @INFO: Load environment variables from .env file
 dotenv.config({ quiet: true });
@@ -26,6 +26,13 @@ export const ALLOW_UPDATE_OPERATION =
 export const ALLOW_DELETE_OPERATION =
   process.env.ALLOW_DELETE_OPERATION === "true";
 export const ALLOW_DDL_OPERATION = process.env.ALLOW_DDL_OPERATION === "true";
+
+// Admin operations (KILL, SET GLOBAL/SESSION variables). Off by default.
+export const ALLOW_ADMIN_OPERATION =
+  process.env.ALLOW_ADMIN_OPERATION === "true";
+
+// In multi-DB mode, writes are blocked unless explicitly enabled
+export const MULTI_DB_WRITE_MODE = process.env.MULTI_DB_WRITE_MODE === "true";
 
 // Transaction mode control
 export const MYSQL_DISABLE_READ_ONLY_TRANSACTIONS = 

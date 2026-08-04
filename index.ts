@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
-  CallToolRequestSchema,
   ListResourcesRequestSchema,
-  ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { performance } from "perf_hooks";
 import { log } from "./src/utils/index.js";
-import type { TableRow, ColumnRow, RoutineRow, EventRow, TriggerRow } from "./src/types/index.js";
+import type { TableRow, RoutineRow, EventRow, TriggerRow } from "./src/types/index.js";
 import {
   ALLOW_DELETE_OPERATION,
   ALLOW_DDL_OPERATION,
@@ -34,19 +31,14 @@ import {
   getPool,
   executeQuery,
   executeReadOnlyQuery,
-  poolPromise,
   cleanup as cleanupPool,
 } from "./src/db/index.js";
-import {
-  additionalToolDefinitions,
-  handleAdditionalTool,
-  addToQueryHistory,
-} from "./src/tools/index.js";
+import { registerAllTools } from "./src/tools/register.js";
 
-import path from 'path';
 import express, { Request, Response } from "express";
 import { fileURLToPath } from 'url';
 import { realpathSync } from 'fs';
+import { timingSafeEqual } from 'crypto';
 
 
 log("info", `Starting MySQL MCP server v${version}...`);
@@ -100,6 +92,9 @@ if (
   toolDescription += " (READ-ONLY)";
 }
 
+toolDescription +=
+  ". This is the primary tool for executing any SQL query (SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.). Use this tool for general database operations, data retrieval, and SQL execution. For specialized operations, consider using the other MySQL tools (mysql_explain for query optimization, mysql_describe for table structure, etc.). Queries are executed with proper transaction handling and permission checking.";
+
 // Determine if we're in read-only mode (no write operations enabled)
 const isReadOnly = !(
   ALLOW_INSERT_OPERATION ||
@@ -143,27 +138,28 @@ export const configSchema = z.object({
 // Export the default function that creates and returns the MCP server
 export default function createMcpServer({
   sessionId,
-  config,
+  config: _serverConfig,
 }: {
   sessionId?: string;
   config: z.infer<typeof configSchema>;
 }) {
-  // Create the server instance
-  const server = new Server(
+  // High-level McpServer (SDK 1.x modern API). Tools are registered through
+  // registerTool (Zod validation, annotations, structured output); resources
+  // keep using low-level handlers via server.server.
+  const server = new McpServer(
     {
       name: "MySQL MCP Server",
-      version: process.env.npm_package_version || "1.0.0",
+      version,
     },
     {
       capabilities: {
         resources: {},
-        tools: {},
       },
     },
   );
 
   // Register request handlers for resources
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  server.server.setRequestHandler(ListResourcesRequestSchema, async () => {
     try {
       log("info", "Handling ListResourcesRequest");
       const connectionInfo = process.env.MYSQL_SOCKET_PATH
@@ -376,7 +372,7 @@ export default function createMcpServer({
   });
 
   // Register request handler for reading resources
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  server.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     try {
       log("info", "Handling ReadResourceRequest:", request.params.uri);
 
@@ -386,7 +382,7 @@ export default function createMcpServer({
       const dbName = uriParts.length > 2 ? uriParts[1] : null;
       const objectName = uriParts.length > 2 ? uriParts[2] : uriParts[1];
 
-      if (!objectName && resourceType !== "tables" && resourceType !== "procedures" && 
+      if (!objectName && resourceType !== "tables" && resourceType !== "procedures" &&
           resourceType !== "functions" && resourceType !== "events" && resourceType !== "triggers") {
         throw new Error(`Invalid resource URI: ${request.params.uri}`);
       }
@@ -409,7 +405,7 @@ export default function createMcpServer({
           } else {
             // Return columns for specific table
             let columnsQuery = `
-              SELECT 
+              SELECT
                 column_name as name,
                 data_type as dataType,
                 column_type as columnType,
@@ -418,7 +414,7 @@ export default function createMcpServer({
                 column_default as defaultValue,
                 extra,
                 column_comment as comment
-              FROM information_schema.columns 
+              FROM information_schema.columns
               WHERE table_name = ?
             `;
             const queryParams = [objectName];
@@ -451,10 +447,10 @@ export default function createMcpServer({
               ? `SHOW CREATE PROCEDURE \`${dbName}\`.\`${objectName}\``
               : `SHOW CREATE PROCEDURE \`${objectName}\``;
             const createResult = await executeQuery<any[]>(procedureQuery);
-            
+
             // Get parameters
             let paramsQuery = `
-              SELECT 
+              SELECT
                 parameter_name as name,
                 parameter_mode as mode,
                 data_type as dataType,
@@ -499,10 +495,10 @@ export default function createMcpServer({
               ? `SHOW CREATE FUNCTION \`${dbName}\`.\`${objectName}\``
               : `SHOW CREATE FUNCTION \`${objectName}\``;
             const createResult = await executeQuery<any[]>(functionQuery);
-            
+
             // Get parameters
             let paramsQuery = `
-              SELECT 
+              SELECT
                 parameter_name as name,
                 parameter_mode as mode,
                 data_type as dataType,
@@ -564,7 +560,7 @@ export default function createMcpServer({
 
             // Get event details
             let detailsQuery = `
-              SELECT 
+              SELECT
                 event_name as name,
                 event_schema as \`database\`,
                 definer,
@@ -600,8 +596,8 @@ export default function createMcpServer({
           if (!objectName) {
             // Return list of all triggers
             const triggersQuery = `
-              SELECT 
-                trigger_name as name, 
+              SELECT
+                trigger_name as name,
                 trigger_schema as \`database\`,
                 event_object_table as tableName,
                 action_timing as timing,
@@ -621,7 +617,7 @@ export default function createMcpServer({
 
             // Get trigger details
             let detailsQuery = `
-              SELECT 
+              SELECT
                 trigger_name as name,
                 trigger_schema as \`database\`,
                 event_object_table as tableName,
@@ -650,7 +646,7 @@ export default function createMcpServer({
 
         default: {
           // Fallback: try to get table columns (backward compatibility)
-          let columnsQuery =
+          const columnsQuery =
             "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?";
           const queryParams = [resourceType];
           results = await executeQuery(columnsQuery, queryParams);
@@ -673,148 +669,56 @@ export default function createMcpServer({
     }
   });
 
-  // Register handler for tool calls
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const startTime = performance.now();
-    try {
-      log("info", "Handling CallToolRequest:", request.params.name);
-      
-      const toolName = request.params.name;
-      const args = request.params.arguments || {};
-
-      // Check if it's one of the additional tools
-      const additionalToolResult = await handleAdditionalTool(toolName, args as Record<string, any>);
-      if (additionalToolResult !== null) {
-        const duration = performance.now() - startTime;
-        addToQueryHistory(
-          `[TOOL] ${toolName}: ${JSON.stringify(args).substring(0, 200)}`,
-          duration,
-          0,
-          !additionalToolResult.isError
-        );
-        // Return only content array (MCP SDK format)
-        return {
-          content: additionalToolResult.content,
-        };
-      }
-
-      // Handle mysql_query tool
-      if (toolName === "mysql_query") {
-        const sql = args.sql as string;
-        if (!sql || typeof sql !== 'string' || sql.trim().length === 0) {
-          return {
-            content: [{
-              type: "text",
-              text: "Error: SQL query is required and cannot be empty"
-            }]
-          };
-        }
-        
-        const result = await executeReadOnlyQuery<{ content: Array<{ type: string; text: string }>; isError: boolean }>(sql);
-        const duration = performance.now() - startTime;
-        
-        // Add to query history
-        try {
-          const rowCount = result?.content?.[0]?.text ? 
-            (JSON.parse(result.content[0].text) || []).length : 0;
-          addToQueryHistory(sql, duration, rowCount, !result.isError);
-        } catch {
-          addToQueryHistory(sql, duration, 0, !result.isError);
-        }
-        
-        // Return only content array (MCP SDK format)
-        // Always return results, even if there's an error flag
-        return {
-          content: result.content,
-        };
-      }
-
-      throw new Error(`Unknown tool: ${toolName}`);
-    } catch (err) {
-      const error = err as Error;
-      log("error", "Error in CallToolRequest handler:", error);
-      const duration = performance.now() - startTime;
-      addToQueryHistory(
-        `[ERROR] ${request.params.name}`,
-        duration,
-        0,
-        false,
-        error.message
-      );
-      // Return error in MCP SDK format (content array only)
-      return {
-        content: [{
-          type: "text",
-          text: `Error: ${error.message}`
-        }]
-      };
-    }
+  // Register all tools through the modern registerTool API (Zod validation,
+  // annotations, structured output). Replaces the manual ListTools/CallTool
+  // handlers of the legacy low-level API.
+  registerAllTools(server, {
+    mysqlQueryDescription: toolDescription,
+    isReadOnly,
   });
 
-  // Register handler for listing tools
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    log("info", "Handling ListToolsRequest");
+  return server;
+}
 
-    const toolsResponse = {
-      tools: [
-        {
-          name: "mysql_query",
-          description: `${toolDescription}. This is the primary tool for executing any SQL query (SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.). Use this tool for general database operations, data retrieval, and SQL execution. For specialized operations, consider using the other MySQL tools (mysql_explain for query optimization, mysql_describe for table structure, etc.). Queries are executed with proper transaction handling and permission checking.`,
-          inputSchema: {
-            type: "object",
-            properties: {
-              sql: {
-                type: "string",
-                description: "The SQL query to execute. Can be any valid MySQL statement: SELECT (read data), INSERT/UPDATE/DELETE (modify data, requires permissions), CREATE/ALTER/DROP (DDL operations, requires permissions), CALL (stored procedures), SHOW (metadata queries), etc.",
-              },
-            },
-            required: ["sql"],
-          },
-          annotations: {
-            readOnlyHint: isReadOnly,
-            idempotentHint: isReadOnly,
-            destructiveHint: !isReadOnly,
-            openWorldHint: false,
-          },
-        },
-        // Add all additional tools
-        ...additionalToolDefinitions,
-      ],
-    };
+/**
+* Checks if the current module is the main module (the entry point of the application).
+* This function works for both ES Modules (ESM) and CommonJS.
+* @returns {boolean} - True if the module is the main module, false otherwise.
+*/
+const isMainModule = () => {
+  if (import.meta.url && process.argv[1]) {
+    const currentModulePath = fileURLToPath(import.meta.url);
+    const mainScriptPath = realpathSync(process.argv[1]);
+    return currentModulePath === mainScriptPath;
+  }
+  return false;
+}
 
-    log(
-      "info",
-      "ListToolsRequest response:",
-      JSON.stringify(toolsResponse, null, 2),
-    );
-    return toolsResponse;
-  });
+// Constant-time comparison of the Authorization header against the expected
+// Bearer token. endsWith()-style checks would accept any token that merely
+// ends with the secret.
+function isAuthorized(authorizationHeader: string | undefined): boolean {
+  if (!authorizationHeader) {
+    return false;
+  }
+  const expected = Buffer.from(`Bearer ${REMOTE_SECRET_KEY}`);
+  const received = Buffer.from(authorizationHeader);
+  if (expected.length !== received.length) {
+    return false;
+  }
+  return timingSafeEqual(expected, received);
+}
 
-  // Initialize database connection and set up shutdown handlers
-  (async () => {
-    try {
-      log("info", "Attempting to test database connection...");
-      // Test the connection before fully starting the server
-      const pool = await getPool();
-      const connection = await pool.getConnection();
-      log("info", "Database connection test successful");
-      connection.release();
-    } catch (error) {
-      log("error", "Fatal error during server startup:", error);
-      safeExit(1);
-    }
-  })();
+// Start the server if this file is being run directly
+if (isMainModule()) {
+  log("info", "Running in standalone mode");
 
-  // Setup shutdown handlers
+  // Process-level handlers are registered once here, not inside
+  // createMcpServer: the factory runs per request in HTTP mode and would
+  // otherwise leak listeners.
   const shutdown = async (signal: string): Promise<void> => {
     log("error", `Received ${signal}. Shutting down...`);
-    try {
-      // Cleanup pool and keep-alive
-      await cleanupPool();
-    } catch (err) {
-      log("error", "Error during shutdown:", err);
-      throw err;
-    }
+    await cleanupPool();
   };
 
   process.on("SIGINT", async () => {
@@ -837,7 +741,6 @@ export default function createMcpServer({
     }
   });
 
-  // Add unhandled error listeners
   process.on("uncaughtException", (error) => {
     log("error", "Uncaught exception:", error);
     safeExit(1);
@@ -848,43 +751,26 @@ export default function createMcpServer({
     safeExit(1);
   });
 
-  return server;
-}
-
-/**
-* Checks if the current module is the main module (the entry point of the application).
-* This function works for both ES Modules (ESM) and CommonJS.
-* @returns {boolean} - True if the module is the main module, false otherwise.
-*/
-const isMainModule = () => {
-  if (import.meta.url && process.argv[1]) {
-    const currentModulePath = fileURLToPath(import.meta.url);
-    const mainScriptPath = realpathSync(process.argv[1]);
-    return currentModulePath === mainScriptPath;
-  }
-  return false;
-}
-
-// Start the server if this file is being run directly
-if (isMainModule()) {
-  log("info", "Running in standalone mode");
-
   // Start the server
   (async () => {
     try {
-      const mcpServer = createMcpServer({ config: { debug: false } });
+      // Test the database connection before accepting clients
+      try {
+        log("info", "Attempting to test database connection...");
+        const pool = await getPool();
+        const connection = await pool.getConnection();
+        log("info", "Database connection test successful");
+        connection.release();
+      } catch (error) {
+        log("error", "Fatal error during server startup:", error);
+        safeExit(1);
+      }
+
       if (IS_REMOTE_MCP && REMOTE_SECRET_KEY?.length) {
         const app = express();
         app.use(express.json());
         app.post("/mcp", async (req: Request, res: Response) => {
-          // In stateless mode, create a new instance of transport and server for each request
-          // to ensure complete isolation. A single instance would cause request ID collisions
-          // when multiple clients connect concurrently.
-          if (
-            !req.get("Authorization") ||
-            !req.get("Authorization")?.startsWith("Bearer ") ||
-            !req.get("Authorization")?.endsWith(REMOTE_SECRET_KEY)
-          ) {
+          if (!isAuthorized(req.get("Authorization"))) {
             log("error", "Missing or invalid Authorization header");
             res.status(401).json({
               jsonrpc: "2.0",
@@ -897,7 +783,11 @@ if (isMainModule()) {
             return;
           }
           try {
-            const server = mcpServer;
+            // Stateless mode: a fresh server + transport per request for full
+            // isolation. Reusing one server instance caused request ID
+            // collisions and its close() on the first finished response tore
+            // down the shared server for every other client.
+            const server = createMcpServer({ config: { debug: false } });
             const transport: StreamableHTTPServerTransport =
               new StreamableHTTPServerTransport({
                 sessionIdGenerator: undefined,
@@ -963,9 +853,8 @@ if (isMainModule()) {
           log("info", `MCP Stateless Streamable HTTP Server listening on port ${PORT}`);
         });
       } else {
+        const mcpServer = createMcpServer({ config: { debug: false } });
         const transport = new StdioServerTransport();
-        // Create a server instance directly instead of importing
-
         await mcpServer.connect(transport);
         log("info", "Server started and listening on stdio");
       }

@@ -8,16 +8,15 @@ const ENABLE_LOGGING =
 export function log(type: LogType = "info", ...args: any[]): void {
   if (!ENABLE_LOGGING) return;
 
-  switch (type) {
-    case "info":
-      console.info(...args);
-      break;
-    case "error":
-      console.error(...args);
-      break;
-    default:
-      console.log(...args);
-  }
+  // Always log to stderr: on stdio transport, stdout carries JSON-RPC frames
+  // and any stray write would corrupt the protocol stream.
+  console.error(`[${type}]`, ...args);
+}
+
+// Escape a MySQL identifier (database, table, column, routine name) for safe
+// interpolation inside backticks. Doubles embedded backticks per MySQL rules.
+export function escapeId(identifier: string): string {
+  return "`" + String(identifier).replace(/`/g, "``") + "`";
 }
 
 // Function to parse schema-specific permissions from environment variables

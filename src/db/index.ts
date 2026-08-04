@@ -10,10 +10,14 @@ import { extractSchemaFromQuery, getQueryTypes } from "./utils.js";
 
 import * as mysql2 from "mysql2/promise";
 import { log } from "./../utils/index.js";
-import { mcpConfig as config, MYSQL_DISABLE_READ_ONLY_TRANSACTIONS } from "./../config/index.js";
+import {
+  mcpConfig as config,
+  MYSQL_DISABLE_READ_ONLY_TRANSACTIONS,
+  MULTI_DB_WRITE_MODE,
+} from "./../config/index.js";
 
 // Force read-only mode in multi-DB mode unless explicitly configured otherwise
-if (isMultiDbMode && process.env.MULTI_DB_WRITE_MODE !== "true") {
+if (isMultiDbMode && !MULTI_DB_WRITE_MODE) {
   log("error", "Multi-DB mode detected - enabling read-only mode for safety");
 }
 
@@ -177,7 +181,7 @@ async function executeQuery<T>(sql: string, params: string[] = []): Promise<T> {
 }
 
 // @INFO: New function to handle write operations
-async function executeWriteQuery<T>(sql: string): Promise<T> {
+async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T> {
   let connection;
   let retries = 0;
   const maxRetries = 3;
@@ -222,7 +226,7 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
     try {
       // @INFO: Execute the write query
       const startTime = performance.now();
-      const result = await connection.query(sql);
+      const result = await connection.query(sql, params);
       const endTime = performance.now();
       const duration = endTime - startTime;
       const response = Array.isArray(result) ? result[0] : result;
@@ -249,19 +253,50 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
       );
 
       // @INFO: Type assertion for ResultSetHeader which has affectedRows, insertId, etc.
+      let structured: Record<string, unknown> | undefined;
       if (isInsertOperation) {
         const resultHeader = response as mysql2.ResultSetHeader;
         responseText = `Insert successful on schema '${schema || "default"}'. Affected rows: ${resultHeader.affectedRows}, Last insert ID: ${resultHeader.insertId}`;
+        structured = {
+          operation: "insert",
+          schema: schema || null,
+          affectedRows: resultHeader.affectedRows,
+          insertId: resultHeader.insertId,
+          durationMs: Number(duration.toFixed(2)),
+        };
       } else if (isUpdateOperation) {
         const resultHeader = response as mysql2.ResultSetHeader;
         responseText = `Update successful on schema '${schema || "default"}'. Affected rows: ${resultHeader.affectedRows}, Changed rows: ${resultHeader.changedRows || 0}`;
+        structured = {
+          operation: "update",
+          schema: schema || null,
+          affectedRows: resultHeader.affectedRows,
+          changedRows: resultHeader.changedRows || 0,
+          durationMs: Number(duration.toFixed(2)),
+        };
       } else if (isDeleteOperation) {
         const resultHeader = response as mysql2.ResultSetHeader;
         responseText = `Delete successful on schema '${schema || "default"}'. Affected rows: ${resultHeader.affectedRows}`;
+        structured = {
+          operation: "delete",
+          schema: schema || null,
+          affectedRows: resultHeader.affectedRows,
+          durationMs: Number(duration.toFixed(2)),
+        };
       } else if (isDDLOperation) {
         responseText = `DDL operation successful on schema '${schema || "default"}'.`;
+        structured = {
+          operation: "ddl",
+          schema: schema || null,
+          durationMs: Number(duration.toFixed(2)),
+        };
       } else {
         responseText = JSON.stringify(response, null, 2);
+        structured = {
+          operation: "other",
+          result: response,
+          durationMs: Number(duration.toFixed(2)),
+        };
       }
 
       return {
@@ -275,6 +310,7 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
             text: `Query execution time: ${duration.toFixed(2)} ms`,
           },
         ],
+        structured,
         isError: false,
       } as T;
     } catch (error: unknown) {
@@ -311,7 +347,10 @@ async function executeWriteQuery<T>(sql: string): Promise<T> {
   }
 }
 
-async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
+async function executeReadOnlyQuery<T>(
+  sql: string,
+  options: { maxRows?: number; params?: any[] } = {},
+): Promise<T> {
   let connection: mysql2.PoolConnection | undefined;
   try {
     // Check the type of query
@@ -332,6 +371,22 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
     const isDDLOperation = queryTypes.some((type) =>
       ["create", "alter", "drop", "truncate"].includes(type),
     );
+    const isWriteOperation =
+      isUpdateOperation || isInsertOperation || isDeleteOperation || isDDLOperation;
+
+    // Enforce read-only in multi-DB mode: without MULTI_DB_WRITE_MODE=true no
+    // write reaches per-schema permission checks at all.
+    if (isWriteOperation && isMultiDbMode && !MULTI_DB_WRITE_MODE) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Error: Write operations are disabled in multi-DB mode. Set MULTI_DB_WRITE_MODE=true to enable them.",
+          },
+        ],
+        isError: true,
+      } as T;
+    }
 
     // Check schema-specific permissions
     if (isInsertOperation && !isInsertAllowedForSchema(schema)) {
@@ -405,7 +460,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
       (isDeleteOperation && isDeleteAllowedForSchema(schema)) ||
       (isDDLOperation && isDDLAllowedForSchema(schema))
     ) {
-      return executeWriteQuery(sql);
+      return executeWriteQuery(sql, options.params ?? []);
     }
 
     // For read-only operations, continue with the original logic
@@ -463,7 +518,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
 
     try {
       // Execute query - in multi-DB mode, we may need to handle USE statements specially
-      const result = await connection.query(sql);
+      const result = await connection.query(sql, options.params ?? []);
       const rows = Array.isArray(result) ? result[0] : result;
 
       // Rollback transaction (since it's read-only)
@@ -477,18 +532,34 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
       // Keep the primary text payload machine-readable. Several handlers parse
       // this field directly when they build MCP resources and higher-level tools.
       let resultText: string;
-      
+      let structured: Record<string, unknown> | undefined;
+
       if (Array.isArray(rows)) {
-        if (rows.length === 0) {
-          resultText = "[]";
-        } else {
-          resultText = JSON.stringify(rows, null, 2);
+        const totalRows = rows.length;
+        const limitedRows =
+          options.maxRows && totalRows > options.maxRows
+            ? rows.slice(0, options.maxRows)
+            : rows;
+        const truncated = limitedRows.length < totalRows;
+
+        resultText =
+          limitedRows.length === 0 ? "[]" : JSON.stringify(limitedRows, null, 2);
+        if (truncated) {
+          resultText += `\n-- Result truncated: showing ${limitedRows.length} of ${totalRows} rows. Use LIMIT/OFFSET or a higher maxRows to see more.`;
         }
+        structured = {
+          rows: limitedRows,
+          rowCount: totalRows,
+          returnedRows: limitedRows.length,
+          truncated,
+        };
       } else if (rows && typeof rows === 'object') {
         // Handle result set headers or other object responses
         resultText = JSON.stringify(rows, null, 2);
+        structured = { result: rows };
       } else {
         resultText = String(rows || "Query executed successfully");
+        structured = { message: resultText };
       }
 
       return {
@@ -498,6 +569,7 @@ async function executeReadOnlyQuery<T>(sql: string): Promise<T> {
             text: resultText,
           },
         ],
+        structured,
         isError: false,
       } as T;
     } catch (error) {
