@@ -115,4 +115,39 @@ async function getQueryTypes(query: string): Promise<string[]> {
   }
 }
 
-export { extractSchemaFromQuery, getQueryTypes };
+/**
+ * Detect UPDATE/DELETE statements without a WHERE clause (full-table writes).
+ * Uses the SQL AST when possible; falls back to a keyword heuristic when the
+ * parser cannot handle the statement. Returns the offending statement types.
+ */
+function detectFullTableWrites(sql: string): string[] {
+  try {
+    const astOrArray: AST | AST[] = parser.astify(sql, { database: "mysql" });
+    const statements = Array.isArray(astOrArray) ? astOrArray : [astOrArray];
+    const offenders: string[] = [];
+    for (const stmt of statements) {
+      const type = stmt.type?.toLowerCase();
+      if ((type === "update" || type === "delete") && !(stmt as any).where) {
+        offenders.push(type);
+      }
+    }
+    return offenders;
+  } catch {
+    // Parser fallback: keyword scan per statement
+    const offenders: string[] = [];
+    for (const statement of sql.split(";")) {
+      const trimmed = statement.trim();
+      if (!trimmed) continue;
+      const keyword = trimmed.split(/[\s(]+/)[0]?.toLowerCase();
+      if (
+        (keyword === "update" || keyword === "delete") &&
+        !/\bWHERE\b/i.test(trimmed)
+      ) {
+        offenders.push(keyword);
+      }
+    }
+    return offenders;
+  }
+}
+
+export { extractSchemaFromQuery, getQueryTypes, detectFullTableWrites };

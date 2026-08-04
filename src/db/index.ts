@@ -6,10 +6,59 @@ import {
   isUpdateAllowedForSchema,
   isDeleteAllowedForSchema,
 } from "./permissions.js";
-import { extractSchemaFromQuery, getQueryTypes } from "./utils.js";
+import {
+  extractSchemaFromQuery,
+  getQueryTypes,
+  detectFullTableWrites,
+} from "./utils.js";
 
 import * as mysql2 from "mysql2/promise";
-import { log } from "./../utils/index.js";
+import { log, formatMysqlError, describeMysqlError } from "./../utils/index.js";
+
+// mysql2 numeric field type codes → readable names, used to expose column
+// metadata so the model knows how to interpret each value (e.g. DECIMAL
+// arrives as string, DATETIME as Date/string).
+const MYSQL_FIELD_TYPES: Record<number, string> = {
+  0: "DECIMAL",
+  1: "TINYINT",
+  2: "SMALLINT",
+  3: "INT",
+  4: "FLOAT",
+  5: "DOUBLE",
+  6: "NULL",
+  7: "TIMESTAMP",
+  8: "BIGINT",
+  9: "MEDIUMINT",
+  10: "DATE",
+  11: "TIME",
+  12: "DATETIME",
+  13: "YEAR",
+  15: "VARCHAR",
+  16: "BIT",
+  245: "JSON",
+  246: "DECIMAL",
+  247: "ENUM",
+  248: "SET",
+  249: "TINYBLOB",
+  250: "MEDIUMBLOB",
+  251: "LONGBLOB",
+  252: "BLOB",
+  253: "VARCHAR",
+  254: "CHAR",
+  255: "GEOMETRY",
+};
+
+function describeFields(
+  fields: mysql2.FieldPacket[] | undefined,
+): Array<{ name: string; type: string }> | undefined {
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return undefined;
+  }
+  return fields.map((field) => ({
+    name: field.name,
+    type: MYSQL_FIELD_TYPES[field.type as number] || `TYPE_${field.type}`,
+  }));
+}
 import {
   mcpConfig as config,
   MYSQL_DISABLE_READ_ONLY_TRANSACTIONS,
@@ -180,8 +229,14 @@ async function executeQuery<T>(sql: string, params: string[] = []): Promise<T> {
   throw new Error("Max retries reached for query execution");
 }
 
-// @INFO: New function to handle write operations
-async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T> {
+// @INFO: New function to handle write operations. With dryRun=true the
+// statement runs inside the transaction and is rolled back instead of
+// committed, so the model can verify affected rows before applying a write.
+async function executeWriteQuery<T>(
+  sql: string,
+  params: any[] = [],
+  dryRun: boolean = false,
+): Promise<T> {
   let connection;
   let retries = 0;
   const maxRetries = 3;
@@ -231,8 +286,12 @@ async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T>
       const duration = endTime - startTime;
       const response = Array.isArray(result) ? result[0] : result;
 
-      // @INFO: Commit the transaction
-      await connection.commit();
+      // @INFO: Commit the transaction (or roll back in dry-run mode)
+      if (dryRun) {
+        await connection.rollback();
+      } else {
+        await connection.commit();
+      }
 
       // @INFO: Format the response based on operation type
       let responseText;
@@ -299,6 +358,11 @@ async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T>
         };
       }
 
+      if (dryRun && structured) {
+        structured.dryRun = true;
+        responseText = `[DRY RUN — rolled back, no changes applied]\n${responseText}`;
+      }
+
       return {
         content: [
           {
@@ -322,9 +386,10 @@ async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T>
         content: [
           {
             type: "text",
-            text: `Error executing write operation: ${error instanceof Error ? error.message : String(error)}`,
+            text: `Error executing write operation: ${formatMysqlError(error)}`,
           },
         ],
+        structured: { error: describeMysqlError(error) },
         isError: true,
       } as T;
     }
@@ -334,9 +399,10 @@ async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T>
       content: [
         {
           type: "text",
-          text: `Database connection error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Database connection error: ${formatMysqlError(error)}`,
         },
       ],
+      structured: { error: describeMysqlError(error) },
       isError: true,
     } as T;
   } finally {
@@ -349,7 +415,12 @@ async function executeWriteQuery<T>(sql: string, params: any[] = []): Promise<T>
 
 async function executeReadOnlyQuery<T>(
   sql: string,
-  options: { maxRows?: number; params?: any[] } = {},
+  options: {
+    maxRows?: number;
+    params?: any[];
+    allowFullTableWrite?: boolean;
+    dryRun?: boolean;
+  } = {},
 ): Promise<T> {
   let connection: mysql2.PoolConnection | undefined;
   try {
@@ -453,6 +524,36 @@ async function executeReadOnlyQuery<T>(
       } as T;
     }
 
+    // Guard: UPDATE/DELETE without WHERE touches the whole table. Require an
+    // explicit opt-in so the model cannot wipe a table by accident.
+    if (
+      (isUpdateOperation || isDeleteOperation) &&
+      !options.allowFullTableWrite
+    ) {
+      const offenders = detectFullTableWrites(sql);
+      if (offenders.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Error: ${offenders.join("/").toUpperCase()} sin cláusula WHERE afectaría a TODA la tabla. ` +
+                `Añade un WHERE, o si realmente quieres modificar todas las filas, repite la llamada con allowFullTableWrite: true. ` +
+                `También puedes previsualizar el alcance con dryRun: true.`,
+            },
+          ],
+          structured: {
+            error: {
+              code: "FULL_TABLE_WRITE_BLOCKED",
+              message: "Write without WHERE clause blocked",
+              hint: "Add a WHERE clause or pass allowFullTableWrite: true. Use dryRun: true to preview affected rows.",
+            },
+          },
+          isError: true,
+        } as T;
+      }
+    }
+
     // For write operations that are allowed, use executeWriteQuery
     if (
       (isInsertOperation && isInsertAllowedForSchema(schema)) ||
@@ -460,7 +561,7 @@ async function executeReadOnlyQuery<T>(
       (isDeleteOperation && isDeleteAllowedForSchema(schema)) ||
       (isDDLOperation && isDDLAllowedForSchema(schema))
     ) {
-      return executeWriteQuery(sql, options.params ?? []);
+      return executeWriteQuery(sql, options.params ?? [], options.dryRun ?? false);
     }
 
     // For read-only operations, continue with the original logic
@@ -520,6 +621,30 @@ async function executeReadOnlyQuery<T>(
       // Execute query - in multi-DB mode, we may need to handle USE statements specially
       const result = await connection.query(sql, options.params ?? []);
       const rows = Array.isArray(result) ? result[0] : result;
+      const fields = Array.isArray(result)
+        ? (result[1] as mysql2.FieldPacket[] | undefined)
+        : undefined;
+
+      // Surface MySQL warnings (truncation, coercion...) — they often reveal
+      // queries that "worked" but produced subtly wrong results.
+      let warnings: any[] = [];
+      try {
+        const warningsResult = await connection.query("SHOW WARNINGS");
+        const warningRows = Array.isArray(warningsResult)
+          ? (warningsResult[0] as any[])
+          : [];
+        if (Array.isArray(warningRows) && warningRows.length > 0) {
+          warnings = warningRows
+            .filter((warning) => warning && warning.Message)
+            .map((warning) => ({
+              level: warning.Level,
+              code: warning.Code,
+              message: warning.Message,
+            }));
+        }
+      } catch {
+        // SHOW WARNINGS is best-effort
+      }
 
       // Rollback transaction (since it's read-only)
       await connection.rollback();
@@ -553,6 +678,14 @@ async function executeReadOnlyQuery<T>(
           returnedRows: limitedRows.length,
           truncated,
         };
+        const columns = describeFields(fields);
+        if (columns) {
+          structured.columns = columns;
+        }
+        if (warnings.length > 0) {
+          structured.warnings = warnings;
+          resultText += `\n-- MySQL warnings: ${JSON.stringify(warnings)}`;
+        }
       } else if (rows && typeof rows === 'object') {
         // Handle result set headers or other object responses
         resultText = JSON.stringify(rows, null, 2);
@@ -582,9 +715,10 @@ async function executeReadOnlyQuery<T>(
         content: [
           {
             type: "text",
-            text: `Error executing query: ${error instanceof Error ? error.message : String(error)}`,
+            text: `Error executing query: ${formatMysqlError(error)}`,
           },
         ],
+        structured: { error: describeMysqlError(error) },
         isError: true,
       } as T;
     }
@@ -609,9 +743,10 @@ async function executeReadOnlyQuery<T>(
         content: [
           {
             type: "text",
-            text: `Database error: ${error instanceof Error ? error.message : String(error)}`,
+            text: `Database error: ${formatMysqlError(error)}`,
           },
         ],
+        structured: { error: describeMysqlError(error) },
         isError: true,
       } as T;
     } finally {

@@ -6,9 +6,82 @@
 import { executeQuery, executeReadOnlyQuery, getPool } from "../db/index.js";
 import { isDDLAllowedForSchema } from "../db/permissions.js";
 import { ALLOW_ADMIN_OPERATION } from "../config/index.js";
-import { log, escapeId } from "../utils/index.js";
+import {
+  log,
+  escapeId,
+  findSimilarNames,
+  formatMysqlError,
+  describeMysqlError,
+} from "../utils/index.js";
 import * as fs from "fs";
 import * as path from "path";
+import { createHash } from "crypto";
+
+/**
+ * Execution context threaded from the MCP layer into long-running tools:
+ * progress notifications and client-side cancellation.
+ */
+export interface ToolContext {
+  reportProgress?: (
+    progress: number,
+    total: number,
+    message?: string,
+  ) => Promise<void> | void;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(context?: ToolContext): void {
+  if (context?.signal?.aborted) {
+    throw new Error("Operación cancelada por el cliente");
+  }
+}
+
+// "Did you mean" helpers — turn not-found errors into immediate corrections
+async function suggestSimilarTables(
+  table: string,
+  database?: string,
+): Promise<string[]> {
+  try {
+    const rows = database
+      ? await executeQuery<any[]>(
+          `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
+          [database],
+        )
+      : await executeQuery<any[]>(
+          `SELECT TABLE_NAME as name FROM information_schema.TABLES
+           WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys')`,
+        );
+    return findSimilarNames(table, rows.map((row) => String(row.name)));
+  } catch {
+    return [];
+  }
+}
+
+async function suggestSimilarRoutines(
+  routine: string,
+  database?: string,
+): Promise<string[]> {
+  try {
+    const rows = database
+      ? await executeQuery<any[]>(
+          `SELECT ROUTINE_NAME as name FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?`,
+          [database],
+        )
+      : await executeQuery<any[]>(
+          `SELECT ROUTINE_NAME as name FROM information_schema.ROUTINES
+           WHERE ROUTINE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys')`,
+        );
+    return findSimilarNames(routine, rows.map((row) => String(row.name)));
+  } catch {
+    return [];
+  }
+}
+
+function didYouMean(suggestions: string[]): string {
+  return suggestions.length > 0
+    ? `\n¿Querías decir?: ${suggestions.join(", ")}`
+    : "";
+}
 
 // Standard error result shared by permission gates
 function permissionError(message: string): {
@@ -77,8 +150,40 @@ export function addToQueryHistory(
 /**
  * Get query history
  */
-export function getQueryHistory(limit: number = 50): typeof queryHistory {
-  return queryHistory.slice(-limit);
+export function getQueryHistory(
+  limit: number = 50,
+  onlyErrors: boolean = false,
+): typeof queryHistory {
+  const source = onlyErrors
+    ? queryHistory.filter((entry) => !entry.success)
+    : queryHistory;
+  return source.slice(-limit);
+}
+
+/**
+ * Aggregated session stats: lets the model self-review its own querying
+ */
+export function getQueryHistoryStats() {
+  const total = queryHistory.length;
+  const errors = queryHistory.filter((entry) => !entry.success).length;
+  const avgDuration =
+    total > 0
+      ? queryHistory.reduce((sum, entry) => sum + entry.duration, 0) / total
+      : 0;
+  const slowestQueries = [...queryHistory]
+    .sort((left, right) => right.duration - left.duration)
+    .slice(0, 5)
+    .map((entry) => ({
+      sql: entry.sql.substring(0, 120),
+      durationMs: Number(entry.duration.toFixed(2)),
+      success: entry.success,
+    }));
+  return {
+    totalQueries: total,
+    errorCount: errors,
+    avgDurationMs: Number(avgDuration.toFixed(2)),
+    slowestQueries,
+  };
 }
 
 /**
@@ -156,6 +261,95 @@ function prependSqlHeader(content: string, header: string): string {
 // TOOL: mysql_explain - Analyze query execution plans
 // ============================================================================
 
+// Extract column names referenced in an attached_condition of a JSON plan
+// (e.g. "((`db`.`t`.`status` = 'x') and (`db`.`t`.`type` = 2))")
+function extractConditionColumns(condition: unknown): string[] {
+  if (typeof condition !== "string") return [];
+  const columns = new Set<string>();
+  const qualified = condition.matchAll(
+    /`[a-zA-Z0-9_]+`\.`[a-zA-Z0-9_]+`\.`([a-zA-Z0-9_]+)`/g,
+  );
+  for (const match of qualified) {
+    columns.add(match[1]);
+  }
+  if (columns.size === 0) {
+    const simple = condition.matchAll(/`([a-zA-Z0-9_]+)`/g);
+    for (const match of simple) {
+      columns.add(match[1]);
+    }
+  }
+  return Array.from(columns).slice(0, 4);
+}
+
+// Walk an EXPLAIN FORMAT=JSON plan and collect ranked issues
+function collectJsonPlanIssues(
+  node: any,
+  issues: Array<{
+    severity: "critical" | "warning" | "info";
+    table: string | null;
+    issue: string;
+    suggestion: string;
+  }>,
+): void {
+  if (!node || typeof node !== "object") return;
+
+  if (Array.isArray(node)) {
+    for (const child of node) collectJsonPlanIssues(child, issues);
+    return;
+  }
+
+  if (node.access_type === "ALL") {
+    const rowsExamined = node.rows_examined_per_scan ?? node.rows ?? null;
+    const conditionColumns = extractConditionColumns(node.attached_condition);
+    issues.push({
+      severity:
+        typeof rowsExamined === "number" && rowsExamined > 10000
+          ? "critical"
+          : "warning",
+      table: node.table_name ?? null,
+      issue: `Full table scan${rowsExamined ? ` (~${rowsExamined} filas examinadas por pasada)` : ""}`,
+      suggestion:
+        conditionColumns.length > 0
+          ? `Considera un índice compuesto sobre (${conditionColumns.join(", ")}) según las condiciones del WHERE`
+          : "Considera añadir un índice para las columnas usadas en el WHERE/JOIN",
+    });
+  }
+
+  if (node.access_type === "index" && node.using_index !== true) {
+    issues.push({
+      severity: "info",
+      table: node.table_name ?? null,
+      issue: "Escaneo completo de índice con acceso a filas",
+      suggestion:
+        "Un índice cubriente (que incluya las columnas del SELECT) evitaría leer la tabla",
+    });
+  }
+
+  if (node.using_filesort === true) {
+    issues.push({
+      severity: "warning",
+      table: node.table_name ?? null,
+      issue: "Using filesort (ordenación sin índice)",
+      suggestion: "Considera un índice que cubra las columnas del ORDER BY",
+    });
+  }
+
+  if (node.using_temporary_table === true) {
+    issues.push({
+      severity: "warning",
+      table: node.table_name ?? null,
+      issue: "Using temporary table",
+      suggestion:
+        "GROUP BY/DISTINCT sin índice adecuado; revisa índices sobre las columnas agrupadas",
+    });
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === "attached_condition") continue;
+    collectJsonPlanIssues(node[key], issues);
+  }
+}
+
 export async function mysqlExplain(
   sql: string,
   format: "traditional" | "json" | "tree" = "traditional",
@@ -184,8 +378,17 @@ export async function mysqlExplain(
       };
     }
 
+    const versionInfo = await getDatabaseVersionInfo().catch(() => null);
+    const isMariaDb = versionInfo?.engine === "MariaDB";
+
+    // MariaDB does not support FORMAT=TREE; fall back to traditional
+    let effectiveFormat = format;
+    if (isMariaDb && format === "tree") {
+      effectiveFormat = "traditional";
+    }
+
     let explainSql: string;
-    switch (format) {
+    switch (effectiveFormat) {
       case "json":
         explainSql = `EXPLAIN FORMAT=JSON ${sql}`;
         break;
@@ -200,17 +403,50 @@ export async function mysqlExplain(
 
     // EXPLAIN ANALYZE actually EXECUTES the statement, so it is opt-in and
     // restricted to SELECT: running it on UPDATE/DELETE would apply the write
-    // and bypass the permission layer.
+    // and bypass the permission layer. MariaDB uses ANALYZE FORMAT=JSON,
+    // which reports estimated (rows) vs actual (r_rows) per step.
+    const analyzeSql = isMariaDb
+      ? `ANALYZE FORMAT=JSON ${sql}`
+      : `EXPLAIN ANALYZE ${sql}`;
     const analyzeResult =
       analyze && normalizedSql.startsWith("SELECT")
-        ? await executeQuery<any[]>(`EXPLAIN ANALYZE ${sql}`).catch(() => null)
+        ? await executeQuery<any[]>(analyzeSql).catch(() => null)
         : null;
 
     let response = {
+      engine: versionInfo?.fullLabel || "unknown",
       explainPlan: result,
-      format,
+      format: effectiveFormat,
       suggestions: [] as string[],
+      issues: [] as Array<{
+        severity: "critical" | "warning" | "info";
+        table: string | null;
+        issue: string;
+        suggestion: string;
+      }>,
     };
+
+    // Always fetch the JSON plan for structured issue analysis (cheap; it
+    // does not execute the query)
+    const jsonPlanResult =
+      effectiveFormat === "json"
+        ? result
+        : await executeQuery<any[]>(`EXPLAIN FORMAT=JSON ${sql}`).catch(
+            () => null,
+          );
+
+    if (jsonPlanResult) {
+      const planRaw =
+        jsonPlanResult[0]?.EXPLAIN ??
+        jsonPlanResult[0]?.[Object.keys(jsonPlanResult[0] || {})[0]];
+      try {
+        const plan =
+          typeof planRaw === "string" ? JSON.parse(planRaw) : planRaw;
+        collectJsonPlanIssues(plan, response.issues);
+      } catch {
+        // JSON plan analysis is best-effort
+      }
+    }
 
     // Analyze the plan and provide suggestions
     if (format === "traditional" && Array.isArray(result)) {
@@ -254,7 +490,13 @@ export async function mysqlExplain(
     }
 
     if (analyzeResult) {
-      response = { ...response, analyzeResult } as any;
+      response = {
+        ...response,
+        analyzeResult,
+        analyzeNote: isMariaDb
+          ? "ANALYZE FORMAT=JSON: compara 'rows' (estimado) con 'r_rows' (real). Desviaciones grandes indican estadísticas desactualizadas (ejecuta ANALYZE TABLE)."
+          : "EXPLAIN ANALYZE: compara los valores estimados (rows=N) con los reales (actual ... rows=N). Desviaciones grandes indican estadísticas desactualizadas (ejecuta ANALYZE TABLE).",
+      } as any;
     }
 
     return {
@@ -267,7 +509,7 @@ export async function mysqlExplain(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -282,6 +524,7 @@ export async function mysqlExplain(
 export async function mysqlDescribe(
   table: string,
   database?: string,
+  includeSampleRows: boolean = false,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -339,6 +582,65 @@ export async function mysqlDescribe(
     const fkParams = database ? [table, database] : [table];
     const foreignKeys = await executeQuery<any[]>(fkQuery, fkParams);
 
+    // Reverse FKs: who references this table (critical to predict cascade
+    // effects before UPDATE/DELETE)
+    const referencedByQuery = `
+      SELECT
+        TABLE_SCHEMA as fromSchema,
+        TABLE_NAME as fromTable,
+        COLUMN_NAME as fromColumn,
+        CONSTRAINT_NAME as constraintName,
+        REFERENCED_COLUMN_NAME as toColumn
+      FROM information_schema.KEY_COLUMN_USAGE
+      WHERE REFERENCED_TABLE_NAME = ?
+        ${database ? "AND REFERENCED_TABLE_SCHEMA = ?" : ""}
+    `;
+    const referencedBy = await executeQuery<any[]>(
+      referencedByQuery,
+      database ? [table, database] : [table],
+    );
+
+    // Triggers attached to this table
+    const triggersQuery = `
+      SELECT
+        TRIGGER_NAME as name,
+        ACTION_TIMING as timing,
+        EVENT_MANIPULATION as event
+      FROM information_schema.TRIGGERS
+      WHERE EVENT_OBJECT_TABLE = ?
+        ${database ? "AND EVENT_OBJECT_SCHEMA = ?" : ""}
+    `;
+    const triggers = await executeQuery<any[]>(
+      triggersQuery,
+      database ? [table, database] : [table],
+    ).catch(() => []);
+
+    // CHECK constraints (MySQL 8.0.16+ / MariaDB 10.2+; best-effort)
+    const checkConstraints = await executeQuery<any[]>(
+      `SELECT cc.CONSTRAINT_NAME as name, cc.CHECK_CLAUSE as checkClause
+       FROM information_schema.CHECK_CONSTRAINTS cc
+       JOIN information_schema.TABLE_CONSTRAINTS tc
+         ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        AND cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+       WHERE tc.TABLE_NAME = ?
+         ${database ? "AND tc.TABLE_SCHEMA = ?" : ""}
+         AND tc.CONSTRAINT_TYPE = 'CHECK'`,
+      database ? [table, database] : [table],
+    ).catch(() => []);
+
+    // Optional sample rows (resolve current database when not provided)
+    let sampleRows: any[] = [];
+    if (includeSampleRows) {
+      let targetDb = database;
+      if (!targetDb) {
+        const dbRow = await executeQuery<any[]>(`SELECT DATABASE() as db`);
+        targetDb = dbRow[0]?.db || undefined;
+      }
+      if (targetDb) {
+        sampleRows = await getTableSampleRows(targetDb, table, 3);
+      }
+    }
+
     const response = {
       table: table,
       database: database || "current",
@@ -358,6 +660,10 @@ export async function mysqlDescribe(
         return acc;
       }, []),
       foreignKeys: foreignKeys,
+      referencedBy,
+      triggers,
+      checkConstraints,
+      ...(includeSampleRows ? { sampleRows } : {}),
       tableStats: status[0]
         ? {
             engine: status[0].Engine,
@@ -379,11 +685,16 @@ export async function mysqlDescribe(
     };
   } catch (error) {
     log("error", "Error in mysql_describe:", error);
+    const info = describeMysqlError(error);
+    const suggestions =
+      info.code === "ER_NO_SUCH_TABLE"
+        ? await suggestSimilarTables(table, database)
+        : [];
     return {
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}${didYouMean(suggestions)}`,
         },
       ],
       isError: true,
@@ -400,6 +711,9 @@ export async function mysqlDataDictionary(
   table?: string,
   format: "json" | "markdown" = "json",
   sampleRowsLimit: number = 3,
+  maxTables?: number,
+  offsetTables: number = 0,
+  context?: ToolContext,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -419,7 +733,7 @@ export async function mysqlDataDictionary(
       };
     }
 
-    const tables = await executeQuery<any[]>(
+    const allTables = await executeQuery<any[]>(
       `SELECT
          TABLE_NAME as tableName,
          TABLE_COMMENT as tableComment,
@@ -435,10 +749,43 @@ export async function mysqlDataDictionary(
       table ? [targetDatabase, table] : [targetDatabase],
     );
 
+    if (table && allTables.length === 0) {
+      const suggestions = await suggestSimilarTables(table, targetDatabase);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: la tabla '${table}' no existe en '${targetDatabase}'.${didYouMean(suggestions)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Deterministic pagination for large databases
+    const safeOffset =
+      Number.isInteger(offsetTables) && offsetTables > 0 ? offsetTables : 0;
+    const safeMax =
+      maxTables !== undefined && Number.isInteger(maxTables) && maxTables > 0
+        ? maxTables
+        : undefined;
+    const tables =
+      safeMax !== undefined || safeOffset > 0
+        ? allTables.slice(safeOffset, safeMax ? safeOffset + safeMax : undefined)
+        : allTables;
+
     const dictionaryTables = [];
+    let processed = 0;
 
     for (const tableRow of tables) {
       const tableName = tableRow.tableName;
+      throwIfAborted(context);
+      processed++;
+      await context?.reportProgress?.(
+        processed,
+        tables.length,
+        `Documentando ${tableName}`,
+      );
 
       const columns = await executeQuery<any[]>(
         `SELECT
@@ -491,16 +838,35 @@ export async function mysqlDataDictionary(
         const existing = acc.find((i) => i.keyName === idx.Key_name);
         if (existing) {
           existing.columns.push(idx.Column_name);
+          existing.cardinality = idx.Cardinality ?? existing.cardinality;
         } else {
           acc.push({
             keyName: idx.Key_name,
             unique: idx.Non_unique === 0,
             indexType: idx.Index_type,
             columns: [idx.Column_name],
+            // Index cardinality from statistics: free selectivity signal
+            cardinality: idx.Cardinality ?? null,
           });
         }
         return acc;
       }, []);
+
+      // Expose ENUM/SET allowed values explicitly so the model writes valid
+      // WHERE clauses without guessing
+      for (const column of columns) {
+        const columnType = String(column.columnType || "");
+        if (/^(enum|set)\(/i.test(columnType)) {
+          const valuesMatch = columnType.match(/^\w+\((.*)\)$/);
+          if (valuesMatch) {
+            column.allowedValues = valuesMatch[1]
+              .split(",")
+              .map((value: string) =>
+                value.trim().replace(/^'(.*)'$/, "$1").replace(/''/g, "'"),
+              );
+          }
+        }
+      }
 
       const primaryKey = columns
         .filter((column) => column.columnKey === "PRI")
@@ -523,10 +889,39 @@ export async function mysqlDataDictionary(
       });
     }
 
+    // Stable hash of the structural definition: lets the model detect schema
+    // drift between calls without re-reading everything
+    const schemaHash = createHash("md5")
+      .update(
+        JSON.stringify(
+          dictionaryTables.map((entry) => ({
+            table: entry.table,
+            columns: entry.columns.map((column: any) => ({
+              name: column.name,
+              type: column.columnType,
+              nullable: column.isNullable,
+              key: column.columnKey,
+            })),
+          })),
+        ),
+      )
+      .digest("hex");
+
     const payload = {
       database: targetDatabase,
       versionInfo,
+      schemaHash,
+      totalTablesInDatabase: allTables.length,
       totalTables: dictionaryTables.length,
+      ...(safeOffset > 0 || safeMax !== undefined
+        ? {
+            pagination: {
+              offsetTables: safeOffset,
+              maxTables: safeMax ?? null,
+              hasMore: safeOffset + tables.length < allTables.length,
+            },
+          }
+        : {}),
       generatedAt: new Date().toISOString(),
       tables: dictionaryTables,
     };
@@ -546,7 +941,7 @@ export async function mysqlDataDictionary(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -714,10 +1109,12 @@ function renderDataDictionaryMarkdown(payload: any): string {
 
 export async function mysqlBackup(
   table: string,
-  format: "json" | "csv" = "json",
+  format: "json" | "csv" | "sql" = "json",
   database?: string,
   whereClause?: string,
   limit?: number,
+  columns?: string[],
+  outputFile?: string,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -736,7 +1133,12 @@ export async function mysqlBackup(
       };
     }
 
-    let sql = `SELECT * FROM ${fullTableName}`;
+    const selectClause =
+      columns && columns.length > 0
+        ? columns.map((column) => escapeId(column)).join(", ")
+        : "*";
+
+    let sql = `SELECT ${selectClause} FROM ${fullTableName}`;
     if (whereClause) {
       sql += ` WHERE ${whereClause}`;
     }
@@ -747,7 +1149,29 @@ export async function mysqlBackup(
     const rows = await executeQuery<any[]>(sql);
 
     let output: string;
-    if (format === "csv") {
+    if (format === "sql") {
+      // INSERT statements ready to replay
+      if (rows.length === 0) {
+        output = `-- No rows found in ${table}`;
+      } else {
+        const columnNames = Object.keys(rows[0]);
+        const escapeSqlValue = (value: any): string => {
+          if (value === null || value === undefined) return "NULL";
+          if (typeof value === "number") return String(value);
+          if (typeof value === "boolean") return value ? "1" : "0";
+          if (value instanceof Date) {
+            return `'${value.toISOString().slice(0, 19).replace("T", " ")}'`;
+          }
+          return `'${String(value).replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+        };
+        output = rows
+          .map(
+            (row) =>
+              `INSERT INTO ${fullTableName} (${columnNames.map((name) => escapeId(name)).join(", ")}) VALUES (${columnNames.map((name) => escapeSqlValue(row[name])).join(", ")});`,
+          )
+          .join("\n");
+      }
+    } else if (format === "csv") {
       if (rows.length === 0) {
         output = "";
       } else {
@@ -776,6 +1200,32 @@ export async function mysqlBackup(
       output = JSON.stringify(rows, null, 2);
     }
 
+    // Write to disk instead of flooding the model context with data
+    if (outputFile) {
+      const resolvedPath = path.resolve(outputFile);
+      fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+      fs.writeFileSync(resolvedPath, output, "utf8");
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                table,
+                format,
+                rowsExported: rows.length,
+                outputFile: resolvedPath,
+                sizeBytes: Buffer.byteLength(output, "utf8"),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+        isError: false,
+      };
+    }
+
     return {
       content: [
         { type: "text", text: output },
@@ -788,11 +1238,16 @@ export async function mysqlBackup(
     };
   } catch (error) {
     log("error", "Error in mysql_backup:", error);
+    const info = describeMysqlError(error);
+    const suggestions =
+      info.code === "ER_NO_SUCH_TABLE"
+        ? await suggestSimilarTables(table, database)
+        : [];
     return {
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}${didYouMean(suggestions)}`,
         },
       ],
       isError: true,
@@ -808,6 +1263,7 @@ export async function mysqlExportSchema(
   database?: string,
   outputDir?: string,
   includeDatabaseStatement: boolean = true,
+  context?: ToolContext,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -886,7 +1342,14 @@ export async function mysqlExportSchema(
       [targetDatabase],
     );
 
+    let exportedCount = 0;
     for (const table of tables) {
+      throwIfAborted(context);
+      await context?.reportProgress?.(
+        ++exportedCount,
+        tables.length,
+        `Exportando tabla ${table.TABLE_NAME}`,
+      );
       const createTableResult = await executeQuery<any[]>(
         `SHOW CREATE TABLE \`${targetDatabase}\`.\`${table.TABLE_NAME}\``,
       );
@@ -927,7 +1390,14 @@ export async function mysqlExportSchema(
       [targetDatabase],
     );
 
+    let viewCount = 0;
     for (const view of views) {
+      throwIfAborted(context);
+      await context?.reportProgress?.(
+        ++viewCount,
+        views.length,
+        `Exportando vista ${view.TABLE_NAME}`,
+      );
       const createViewResult = await executeQuery<any[]>(
         `SHOW CREATE VIEW \`${targetDatabase}\`.\`${view.TABLE_NAME}\``,
       );
@@ -960,7 +1430,14 @@ export async function mysqlExportSchema(
       [targetDatabase],
     );
 
+    let routineCount = 0;
     for (const routine of routines) {
+      throwIfAborted(context);
+      await context?.reportProgress?.(
+        ++routineCount,
+        routines.length,
+        `Exportando rutina ${routine.ROUTINE_NAME}`,
+      );
       if (routine.ROUTINE_TYPE === "PROCEDURE") {
         const createProcedureResult = await executeQuery<any[]>(
           `SHOW CREATE PROCEDURE \`${targetDatabase}\`.\`${routine.ROUTINE_NAME}\``,
@@ -1127,7 +1604,7 @@ export async function mysqlExportSchema(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -1192,18 +1669,26 @@ export async function mysqlCompareSchemas(
   isError: boolean;
 }> {
   try {
-    // Get tables from both databases
+    // Get tables (with options) from both databases
     const sourceTablesResult = await executeQuery<any[]>(
-      `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
+      `SELECT TABLE_NAME as name, ENGINE as engine, TABLE_COLLATION as collation
+       FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
       [sourceDb],
     );
     const targetTablesResult = await executeQuery<any[]>(
-      `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
+      `SELECT TABLE_NAME as name, ENGINE as engine, TABLE_COLLATION as collation
+       FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
       [targetDb],
     );
 
     const sourceTables = new Set(sourceTablesResult.map((t) => t.name));
     const targetTables = new Set(targetTablesResult.map((t) => t.name));
+    const sourceTableOptions = new Map(
+      sourceTablesResult.map((t) => [t.name, t]),
+    );
+    const targetTableOptions = new Map(
+      targetTablesResult.map((t) => [t.name, t]),
+    );
 
     const differences: any = {
       summary: {
@@ -1216,6 +1701,8 @@ export async function mysqlCompareSchemas(
       tablesOnlyInTarget: [] as string[],
       columnDifferences: [] as any[],
       indexDifferences: [] as any[],
+      tableOptionDifferences: [] as any[],
+      objectDifferences: {} as Record<string, any>,
     };
 
     // Find tables only in source
@@ -1277,8 +1764,17 @@ export async function mysqlCompareSchemas(
             col.COLUMN_TYPE !== targetCol.COLUMN_TYPE ||
             col.IS_NULLABLE !== targetCol.IS_NULLABLE
           ) {
+            // Narrowing types or adding NOT NULL can lose/reject data
+            const sourceType = String(col.COLUMN_TYPE);
+            const targetType = String(targetCol.COLUMN_TYPE);
+            const severity =
+              sourceType.length < targetType.length ||
+              (col.IS_NULLABLE === "NO" && targetCol.IS_NULLABLE === "YES")
+                ? "breaking"
+                : "safe";
             tableDiff.columnTypeDifferences.push({
               column: colName,
+              severity,
               source: { type: col.COLUMN_TYPE, nullable: col.IS_NULLABLE },
               target: {
                 type: targetCol.COLUMN_TYPE,
@@ -1368,7 +1864,94 @@ export async function mysqlCompareSchemas(
       ) {
         differences.indexDifferences.push(indexDiff);
       }
+
+      // Compare table options (engine, collation)
+      const sourceOptions = sourceTableOptions.get(table);
+      const targetOptions = targetTableOptions.get(table);
+      if (
+        sourceOptions &&
+        targetOptions &&
+        (sourceOptions.engine !== targetOptions.engine ||
+          sourceOptions.collation !== targetOptions.collation)
+      ) {
+        differences.tableOptionDifferences.push({
+          table,
+          source: {
+            engine: sourceOptions.engine,
+            collation: sourceOptions.collation,
+          },
+          target: {
+            engine: targetOptions.engine,
+            collation: targetOptions.collation,
+          },
+        });
+      }
     }
+
+    // Compare routines, views and triggers by definition hash
+    const hashBody = (body: unknown): string =>
+      createHash("md5")
+        .update(String(body ?? "").replace(/\s+/g, " ").trim())
+        .digest("hex");
+
+    const compareObjectSets = async (
+      objectType: string,
+      query: string,
+    ): Promise<any> => {
+      const [sourceRows, targetRows] = await Promise.all([
+        executeQuery<any[]>(query, [sourceDb]),
+        executeQuery<any[]>(query, [targetDb]),
+      ]);
+      const sourceMap = new Map(
+        sourceRows.map((row) => [row.name, hashBody(row.body)]),
+      );
+      const targetMap = new Map(
+        targetRows.map((row) => [row.name, hashBody(row.body)]),
+      );
+
+      const onlyInSource: string[] = [];
+      const onlyInTarget: string[] = [];
+      const differentDefinition: string[] = [];
+
+      for (const [name, hash] of sourceMap) {
+        if (!targetMap.has(name)) {
+          onlyInSource.push(name);
+        } else if (targetMap.get(name) !== hash) {
+          differentDefinition.push(name);
+        }
+      }
+      for (const name of targetMap.keys()) {
+        if (!sourceMap.has(name)) {
+          onlyInTarget.push(name);
+        }
+      }
+
+      return { objectType, onlyInSource, onlyInTarget, differentDefinition };
+    };
+
+    const [routineDiff, viewDiff, triggerDiff] = await Promise.all([
+      compareObjectSets(
+        "routines",
+        `SELECT ROUTINE_NAME as name, ROUTINE_DEFINITION as body
+         FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?`,
+      ),
+      compareObjectSets(
+        "views",
+        `SELECT TABLE_NAME as name, VIEW_DEFINITION as body
+         FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?`,
+      ),
+      compareObjectSets(
+        "triggers",
+        `SELECT TRIGGER_NAME as name, ACTION_STATEMENT as body
+         FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ?`,
+      ),
+    ]);
+
+    differences.objectDifferences = {
+      routines: routineDiff,
+      views: viewDiff,
+      triggers: triggerDiff,
+    };
 
     differences.summary.tablesOnlyInSource =
       differences.tablesOnlyInSource.length;
@@ -1389,7 +1972,7 @@ export async function mysqlCompareSchemas(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -1416,6 +1999,7 @@ export async function mysqlGenerateMigration(
 
     const diff = JSON.parse(comparison.content[0].text);
     const migrations: string[] = [];
+    const downMigrations: string[] = [];
 
     migrations.push(`-- Migration script from '${sourceDb}' to '${targetDb}'`);
     migrations.push(`-- Generated at ${new Date().toISOString()}`);
@@ -1443,6 +2027,9 @@ export async function mysqlGenerateMigration(
           );
           migrations.push(`-- Create table: ${table}`);
           migrations.push(createSql + ";\n");
+          downMigrations.push(
+            `DROP TABLE IF EXISTS ${escapeId(targetDb)}.\`${table}\`;`,
+          );
         }
       }
     }
@@ -1489,11 +2076,17 @@ export async function mysqlGenerateMigration(
             migrations.push(
               `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` ADD COLUMN \`${col}\` ${colInfo[0].COLUMN_TYPE} ${nullable}${defaultVal};`,
             );
+            downMigrations.push(
+              `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` DROP COLUMN \`${col}\`;`,
+            );
           }
         }
 
         // Columns to drop (commented for safety)
         for (const col of tableDiff.columnsOnlyInTarget) {
+          migrations.push(
+            `-- ⚠️ DATA LOSS si se descomenta: elimina la columna y sus datos`,
+          );
           migrations.push(
             `-- ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` DROP COLUMN \`${col}\`;`,
           );
@@ -1503,8 +2096,18 @@ export async function mysqlGenerateMigration(
         for (const colDiff of tableDiff.columnTypeDifferences) {
           const nullable =
             colDiff.source.nullable === "YES" ? "NULL" : "NOT NULL";
+          if (colDiff.severity === "breaking") {
+            migrations.push(
+              `-- ⚠️ POSIBLE PÉRDIDA DE DATOS: cambio de ${colDiff.target.type} a ${colDiff.source.type}`,
+            );
+          }
           migrations.push(
             `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` MODIFY COLUMN \`${colDiff.column}\` ${colDiff.source.type} ${nullable};`,
+          );
+          const downNullable =
+            colDiff.target.nullable === "YES" ? "NULL" : "NOT NULL";
+          downMigrations.push(
+            `ALTER TABLE \`${targetDb}\`.\`${tableDiff.table}\` MODIFY COLUMN \`${colDiff.column}\` ${colDiff.target.type} ${downNullable};`,
           );
         }
 
@@ -1514,6 +2117,14 @@ export async function mysqlGenerateMigration(
 
     if (migrations.length <= 4) {
       migrations.push("-- No differences found. Schemas are identical.");
+    }
+
+    // Reverse (down) migration to undo the changes above
+    if (downMigrations.length > 0) {
+      migrations.push(`-- ============================================`);
+      migrations.push(`-- DOWN MIGRATION (revierte los cambios de arriba)`);
+      migrations.push(`-- ============================================\n`);
+      migrations.push(...downMigrations.reverse());
     }
 
     return {
@@ -1526,7 +2137,7 @@ export async function mysqlGenerateMigration(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -1552,8 +2163,6 @@ export async function mysqlCallProcedure(
       ? `${escapeId(database)}.${escapeId(procedureName)}`
       : escapeId(procedureName);
 
-    // OUT/INOUT parameters are mapped to MySQL user variables (@name) appended
-    // after the positional IN parameters, then read back with a SELECT.
     for (const name of outParams) {
       if (!/^[a-zA-Z0-9_]+$/.test(name)) {
         return {
@@ -1568,23 +2177,117 @@ export async function mysqlCallProcedure(
       }
     }
 
-    const placeholders = [
-      ...params.map(() => "?"),
-      ...outParams.map((name) => `@${name}`),
-    ].join(", ");
-    const sql = `CALL ${fullProcName}(${placeholders})`;
+    // Read the real signature so we can validate the call BEFORE executing
+    // and auto-map OUT/INOUT parameters in declared order.
+    let signatureQuery = `
+      SELECT PARAMETER_NAME as name, PARAMETER_MODE as mode, DTD_IDENTIFIER as type
+      FROM information_schema.PARAMETERS
+      WHERE SPECIFIC_NAME = ? AND ROUTINE_TYPE = 'PROCEDURE'
+        AND PARAMETER_NAME IS NOT NULL
+    `;
+    const signatureParams = [procedureName];
+    if (database) {
+      signatureQuery += " AND SPECIFIC_SCHEMA = ?";
+      signatureParams.push(database);
+    }
+    signatureQuery += " ORDER BY ORDINAL_POSITION";
+    const declared = await executeQuery<any[]>(
+      signatureQuery,
+      signatureParams,
+    ).catch(() => []);
 
-    log("info", `Executing stored procedure: ${sql}`, params);
+    const renderSignature = () =>
+      declared
+        .map((p) => `${p.mode} ${p.name} ${p.type}`)
+        .join(", ") || "(sin parámetros)";
+
+    let sql: string;
+    let queryParams: any[] = params;
+    let outNames: string[] = outParams;
+    const preStatements: Array<{ sql: string; value: any }> = [];
+
+    if (declared.length > 0) {
+      // Inputs expected: one value per IN or INOUT parameter
+      const inputParams = declared.filter(
+        (p) => p.mode === "IN" || p.mode === "INOUT",
+      );
+      if (params.length !== inputParams.length) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Error: '${procedureName}' espera ${inputParams.length} valor(es) de entrada y recibió ${params.length}.\n` +
+                `Firma real: ${procedureName}(${renderSignature()})\n` +
+                `Pasa en 'params' un valor por cada parámetro IN/INOUT en ese orden; los OUT se devuelven automáticamente.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Build the argument list in declared order
+      const placeholders: string[] = [];
+      const autoOutNames: string[] = [];
+      let inputIndex = 0;
+      for (const param of declared) {
+        const safeName = /^[a-zA-Z0-9_]+$/.test(String(param.name))
+          ? String(param.name)
+          : `p${placeholders.length + 1}`;
+        if (param.mode === "IN") {
+          placeholders.push("?");
+          inputIndex++;
+        } else if (param.mode === "INOUT") {
+          preStatements.push({
+            sql: `SET @${safeName} = ?`,
+            value: params[inputIndex],
+          });
+          inputIndex++;
+          placeholders.push(`@${safeName}`);
+          autoOutNames.push(safeName);
+        } else {
+          placeholders.push(`@${safeName}`);
+          autoOutNames.push(safeName);
+        }
+      }
+      // IN values are the input list minus the INOUT ones (those go via SET),
+      // walking the declared order
+      const inValues: any[] = [];
+      let cursor = 0;
+      for (const param of declared) {
+        if (param.mode === "IN") {
+          inValues.push(params[cursor]);
+          cursor++;
+        } else if (param.mode === "INOUT") {
+          cursor++;
+        }
+      }
+      queryParams = inValues;
+      outNames = autoOutNames;
+      sql = `CALL ${fullProcName}(${placeholders.join(", ")})`;
+    } else {
+      // No metadata available: legacy behavior (IN placeholders + OUT vars)
+      const placeholders = [
+        ...params.map(() => "?"),
+        ...outParams.map((name) => `@${name}`),
+      ].join(", ");
+      sql = `CALL ${fullProcName}(${placeholders})`;
+    }
+
+    log("info", `Executing stored procedure: ${sql}`, queryParams);
 
     const pool = await getPool();
     const connection = await pool.getConnection();
 
     try {
-      const [results] = await connection.query(sql, params);
+      for (const pre of preStatements) {
+        await connection.query(pre.sql, [pre.value]);
+      }
+      const [results] = await connection.query(sql, queryParams);
 
       let outValues: Record<string, unknown> | null = null;
-      if (outParams.length > 0) {
-        const selectOut = `SELECT ${outParams
+      if (outNames.length > 0) {
+        const selectOut = `SELECT ${outNames
           .map((name) => `@${name} AS ${escapeId(name)}`)
           .join(", ")}`;
         const [outRows] = await connection.query(selectOut);
@@ -1614,11 +2317,16 @@ export async function mysqlCallProcedure(
     }
   } catch (error) {
     log("error", "Error in mysql_call_procedure:", error);
+    const info = describeMysqlError(error);
+    const suggestions =
+      info.code === "ER_SP_DOES_NOT_EXIST"
+        ? await suggestSimilarRoutines(procedureName, database)
+        : [];
     return {
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}${didYouMean(suggestions)}`,
         },
       ],
       isError: true,
@@ -1721,7 +2429,7 @@ export async function mysqlShowViews(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2016,6 +2724,24 @@ export async function mysqlRoutineImpact(
           )[0]?.routineType?.toLowerCase() || "auto"
         : routineType;
 
+    // If auto-resolution found nothing, the routine does not exist: fail fast
+    // with suggestions instead of scanning the whole database for nothing.
+    if (routineType === "auto" && resolvedType === "auto") {
+      const suggestions = await suggestSimilarRoutines(
+        cleanRoutineName,
+        targetDatabase,
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: la rutina '${cleanRoutineName}' no existe en '${targetDatabase}'.${didYouMean(suggestions)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const patterns = buildRoutineUsagePatterns(
       cleanRoutineName,
       targetDatabase,
@@ -2023,6 +2749,36 @@ export async function mysqlRoutineImpact(
         ? resolvedType
         : "auto",
     );
+
+    // Analyze the routine's own definition: which tables it touches (impact
+    // in the other direction) and whether it builds dynamic SQL
+    const ownDefinition = await getRoutineDefinition(targetDatabase, {
+      objectType: resolvedType === "function" ? "FUNCTION" : "PROCEDURE",
+      name: cleanRoutineName,
+    });
+    let tablesUsed: string[] = [];
+    let usesDynamicSql = false;
+    if (ownDefinition) {
+      usesDynamicSql = /\b(PREPARE\s+\w+\s+FROM|EXECUTE\s+\w+)/i.test(
+        ownDefinition,
+      );
+      try {
+        const knownTables = await executeQuery<any[]>(
+          `SELECT TABLE_NAME as name FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?`,
+          [targetDatabase],
+        );
+        tablesUsed = knownTables
+          .map((row) => String(row.name))
+          .filter((tableName) =>
+            new RegExp(
+              `(^|[^A-Za-z0-9_])\`?${escapeRegExp(tableName)}\`?([^A-Za-z0-9_]|$)`,
+              "i",
+            ).test(ownDefinition),
+          );
+      } catch {
+        // best-effort
+      }
+    }
 
     const allObjects: RoutineImpactObject[] = [];
     const routines = await executeQuery<any[]>(
@@ -2150,16 +2906,27 @@ export async function mysqlRoutineImpact(
                   ? "full-definition-scan"
                   : "prefilter-then-verify",
               },
+              routineAnalysis: {
+                tablesUsed,
+                usesDynamicSql,
+              },
               summary: {
                 totalReferences: references.length,
                 byObjectType: summaryByType,
               },
               references,
-              warnings: shouldScanAllDefinitions
-                ? []
-                : [
-                    "La base tiene muchos objetos. Se uso prefiltrado por metadata y verificacion con SHOW CREATE para reducir tiempo de respuesta.",
-                  ],
+              warnings: [
+                ...(shouldScanAllDefinitions
+                  ? []
+                  : [
+                      "La base tiene muchos objetos. Se uso prefiltrado por metadata y verificacion con SHOW CREATE para reducir tiempo de respuesta.",
+                    ]),
+                ...(usesDynamicSql
+                  ? [
+                      "La rutina usa SQL dinamico (PREPARE/EXECUTE): el analisis estatico de tablas y referencias puede estar incompleto.",
+                    ]
+                  : []),
+              ],
             },
             null,
             2,
@@ -2174,7 +2941,7 @@ export async function mysqlRoutineImpact(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2296,7 +3063,7 @@ export async function mysqlVariables(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2314,6 +3081,26 @@ export async function mysqlIndexSuggestions(database?: string): Promise<{
 }> {
   try {
     const suggestions: any[] = [];
+
+    // Real usage data from the sys schema when available (much better signal
+    // than name-based heuristics)
+    let unusedIndexes: any[] = [];
+    let unusedIndexesSource = "not available (sys schema not accessible)";
+    try {
+      let unusedQuery = `
+        SELECT object_schema as \`database\`, object_name as tableName, index_name as indexName
+        FROM sys.schema_unused_indexes`;
+      const unusedParams: string[] = [];
+      if (database) {
+        unusedQuery += ` WHERE object_schema = ?`;
+        unusedParams.push(database);
+      }
+      unusedIndexes = await executeQuery<any[]>(unusedQuery, unusedParams);
+      unusedIndexesSource =
+        "sys.schema_unused_indexes (índices sin uso desde el último reinicio del servidor)";
+    } catch {
+      // sys schema not available (older MySQL/MariaDB or no permissions)
+    }
 
     // Get tables to analyze
     let tablesQuery = `
@@ -2359,13 +3146,45 @@ export async function mysqlIndexSuggestions(database?: string): Promise<{
         [table.db, table.name],
       );
 
-      // Get existing indexes
+      // Get existing indexes (full definitions for redundancy analysis)
       const indexes = await executeQuery<any[]>(
-        `SELECT COLUMN_NAME FROM information_schema.STATISTICS 
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+        `SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+         FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
         [table.db, table.name],
       );
       const indexedColumns = new Set(indexes.map((i) => i.COLUMN_NAME));
+
+      // Redundant index detection: an index whose column list is a prefix of
+      // another index is (usually) redundant and slows down writes
+      const indexDefs = new Map<string, { unique: boolean; columns: string[] }>();
+      for (const idx of indexes) {
+        const entry = indexDefs.get(idx.INDEX_NAME) || {
+          unique: idx.NON_UNIQUE === 0,
+          columns: [],
+        };
+        entry.columns.push(idx.COLUMN_NAME);
+        indexDefs.set(idx.INDEX_NAME, entry);
+      }
+      for (const [nameA, defA] of indexDefs) {
+        if (nameA === "PRIMARY" || defA.unique) continue;
+        for (const [nameB, defB] of indexDefs) {
+          if (nameA === nameB) continue;
+          const isPrefix =
+            defA.columns.length < defB.columns.length &&
+            defA.columns.every((col, i) => col === defB.columns[i]);
+          if (isPrefix) {
+            tableSuggestions.issues.push(
+              `🟡 Índice redundante '${nameA}' (${defA.columns.join(", ")}): es prefijo de '${nameB}' (${defB.columns.join(", ")})`,
+            );
+            tableSuggestions.suggestions.push(
+              `-- Redundante, ralentiza escrituras sin aportar lecturas:\nALTER TABLE \`${table.db}\`.\`${table.name}\` DROP INDEX \`${nameA}\`;`,
+            );
+            break;
+          }
+        }
+      }
 
       for (const fk of fkColumns) {
         if (!indexedColumns.has(fk.COLUMN_NAME)) {
@@ -2426,6 +3245,15 @@ export async function mysqlIndexSuggestions(database?: string): Promise<{
             {
               analyzedTables: tables.length,
               tablesWithSuggestions: suggestions.length,
+              priorityGuide: {
+                "⚠️": "alta: sin PK o FK sin índice (afecta a todas las queries de esa tabla)",
+                "🟡": "media: índice redundante (ralentiza escrituras)",
+                "💡": "baja: heurística por nombre de columna, valida con mysql_explain",
+              },
+              unusedIndexes: {
+                source: unusedIndexesSource,
+                indexes: unusedIndexes,
+              },
               suggestions,
             },
             null,
@@ -2441,7 +3269,7 @@ export async function mysqlIndexSuggestions(database?: string): Promise<{
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2456,6 +3284,7 @@ export async function mysqlIndexSuggestions(database?: string): Promise<{
 export async function mysqlForeignKeys(
   database?: string,
   table?: string,
+  format: "json" | "mermaid" = "json",
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -2532,6 +3361,39 @@ export async function mysqlForeignKeys(
       });
     }
 
+    if (format === "mermaid") {
+      // Mermaid erDiagram: models reason well over this format and it renders
+      // directly in most markdown viewers
+      const sanitize = (name: string) => name.replace(/[^A-Za-z0-9_]/g, "_");
+      const lines = ["erDiagram"];
+      const seen = new Set<string>();
+      for (const rel of relationships) {
+        const parent = sanitize(rel.referencedTable);
+        const child = sanitize(rel.tableName);
+        const line = `  ${parent} ||--o{ ${child} : "${rel.columnName} -> ${rel.referencedColumn}"`;
+        if (!seen.has(line)) {
+          seen.add(line);
+          lines.push(line);
+        }
+      }
+      if (relationships.length === 0) {
+        lines.push("  %% No hay foreign keys definidas");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "```mermaid\n" +
+              lines.join("\n") +
+              "\n```\n" +
+              `\n${relationships.length} relaciones entre ${Object.keys(graph).length} tablas.`,
+          },
+        ],
+        isError: false,
+      };
+    }
+
     return {
       content: [
         {
@@ -2555,7 +3417,7 @@ export async function mysqlForeignKeys(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2671,7 +3533,7 @@ export async function mysqlTableStats(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2683,13 +3545,64 @@ export async function mysqlTableStats(
 // TOOL: mysql_process_list - Show running processes/queries
 // ============================================================================
 
-export async function mysqlProcessList(full: boolean = false): Promise<{
+export async function mysqlProcessList(
+  full: boolean = false,
+  user?: string,
+  db?: string,
+  minTime?: number,
+): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 }> {
   try {
-    const sql = full ? "SHOW FULL PROCESSLIST" : "SHOW PROCESSLIST";
-    const processes = await executeQuery<any[]>(sql);
+    // information_schema.PROCESSLIST admits parameterized filters (SHOW
+    // PROCESSLIST does not)
+    let sql = `
+      SELECT ID as Id, USER as User, HOST as Host, DB as db,
+             COMMAND as Command, TIME as Time, STATE as State, INFO as Info
+      FROM information_schema.PROCESSLIST
+      WHERE 1=1`;
+    const params: any[] = [];
+    if (user) {
+      sql += ` AND USER = ?`;
+      params.push(user);
+    }
+    if (db) {
+      sql += ` AND DB = ?`;
+      params.push(db);
+    }
+    if (minTime !== undefined && Number.isInteger(minTime) && minTime >= 0) {
+      sql += ` AND TIME >= ?`;
+      params.push(minTime);
+    }
+    sql += ` ORDER BY TIME DESC`;
+
+    let processes = await executeQuery<any[]>(sql, params);
+    if (!full) {
+      processes = processes.map((p) => ({
+        ...p,
+        Info:
+          typeof p.Info === "string" && p.Info.length > 120
+            ? `${p.Info.substring(0, 120)}...`
+            : p.Info,
+      }));
+    }
+
+    // Long-running InnoDB transactions: the usual culprit behind locks
+    let innodbTransactions: any[] = [];
+    try {
+      innodbTransactions = await executeQuery<any[]>(
+        `SELECT trx_id as id, trx_state as state, trx_started as started,
+                TIMESTAMPDIFF(SECOND, trx_started, NOW()) as ageSeconds,
+                trx_mysql_thread_id as processId,
+                trx_rows_locked as rowsLocked,
+                trx_rows_modified as rowsModified
+         FROM information_schema.INNODB_TRX
+         ORDER BY trx_started`,
+      );
+    } catch {
+      // Not available or no permissions
+    }
 
     // Analyze processes
     const analysis = {
@@ -2714,6 +3627,7 @@ export async function mysqlProcessList(full: boolean = false): Promise<{
           text: JSON.stringify(
             {
               analysis,
+              innodbTransactions,
               processes,
             },
             null,
@@ -2729,7 +3643,7 @@ export async function mysqlProcessList(full: boolean = false): Promise<{
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2790,7 +3704,7 @@ export async function mysqlKillProcess(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -2928,7 +3842,7 @@ export async function mysqlCreateProcedure(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -3082,7 +3996,7 @@ export async function mysqlAlterProcedure(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -3150,7 +4064,7 @@ export async function mysqlAlterTable(
       content: [
         {
           type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          text: `Error: ${formatMysqlError(error)}`,
         },
       ],
       isError: true,
@@ -3725,6 +4639,7 @@ export const additionalToolDefinitions = [
 export async function handleAdditionalTool(
   toolName: string,
   args: Record<string, any>,
+  context?: ToolContext,
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -3734,7 +4649,7 @@ export async function handleAdditionalTool(
       return mysqlExplain(args.sql, args.format, args.analyze);
 
     case "mysql_describe":
-      return mysqlDescribe(args.table, args.database);
+      return mysqlDescribe(args.table, args.database, args.includeSampleRows);
 
     case "mysql_data_dictionary":
       return mysqlDataDictionary(
@@ -3742,6 +4657,9 @@ export async function handleAdditionalTool(
         args.table,
         args.format,
         args.sampleRowsLimit,
+        args.maxTables,
+        args.offsetTables,
+        context,
       );
 
     case "mysql_backup":
@@ -3751,6 +4669,8 @@ export async function handleAdditionalTool(
         args.database,
         args.whereClause,
         args.limit,
+        args.columns,
+        args.outputFile,
       );
 
     case "mysql_export_schema":
@@ -3758,6 +4678,7 @@ export async function handleAdditionalTool(
         args.database,
         args.outputDir || args.outputPath,
         args.includeDatabaseStatement,
+        context,
       );
 
     case "mysql_compare_schemas":
@@ -3778,7 +4699,14 @@ export async function handleAdditionalTool(
         content: [
           {
             type: "text",
-            text: JSON.stringify(getQueryHistory(args.limit), null, 2),
+            text: JSON.stringify(
+              {
+                stats: getQueryHistoryStats(),
+                entries: getQueryHistory(args.limit, args.onlyErrors),
+              },
+              null,
+              2,
+            ),
           },
         ],
         isError: false,
@@ -3816,13 +4744,13 @@ export async function handleAdditionalTool(
       return mysqlIndexSuggestions(args.database);
 
     case "mysql_foreign_keys":
-      return mysqlForeignKeys(args.database, args.table);
+      return mysqlForeignKeys(args.database, args.table, args.format);
 
     case "mysql_table_stats":
       return mysqlTableStats(args.database, args.table);
 
     case "mysql_process_list":
-      return mysqlProcessList(args.full);
+      return mysqlProcessList(args.full, args.user, args.db, args.minTime);
 
     case "mysql_kill_process":
       return mysqlKillProcess(args.processId, args.mode);

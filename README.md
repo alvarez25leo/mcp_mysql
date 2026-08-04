@@ -10,11 +10,23 @@ Construido sobre la API moderna del SDK oficial (`@modelcontextprotocol/sdk`
 
 - **Inputs validados con Zod**: si la IA envía argumentos mal formados recibe
   un error claro y accionable (`isError: true`) que le permite autocorregirse.
-- **`structuredContent` en las respuestas**: además del texto, cada tool
-  devuelve datos estructurados que el modelo puede consumir sin re-parsear.
+- **`structuredContent` + `outputSchema` en las 21 tools**: además del texto,
+  cada tool devuelve datos estructurados y declara su forma de salida.
+- **Errores enriquecidos con hint**: cada error MySQL incluye su código
+  (`ER_NO_SUCH_TABLE`...) y una sugerencia de corrección accionable.
+- **"¿Querías decir?"**: si una tabla/rutina no existe, el error incluye los
+  nombres más parecidos (fuzzy matching) para corregir a la primera.
+- **Guard de escrituras**: UPDATE/DELETE sin WHERE se bloquean salvo opt-in
+  explícito, y `dryRun` permite previsualizar el alcance con rollback.
 - **`title` y `annotations` en todas las tools**: el cliente sabe qué tools
   son de solo lectura (`readOnlyHint`) y cuáles destructivas
   (`destructiveHint`), y puede pedir confirmación solo para las peligrosas.
+- **Prompts guiados y resources con autocompletado**: flujos predefinidos
+  (`analyze-database`, `optimize-query`, `safe-migration`) y URIs
+  `mysql://tables/{db}/{table}` con autocompletado de nombres.
+- **Progreso y cancelación** en operaciones largas, y **elicitation**
+  (confirmación humana) antes de acciones destructivas si el cliente lo
+  soporta.
 - **Sistema de permisos por capas**: flags globales, permisos por esquema,
   gate de administración y modo multi-DB forzado a solo lectura.
 - **Límite de filas por defecto**: los SELECT grandes se truncan con aviso
@@ -28,6 +40,7 @@ Construido sobre la API moderna del SDK oficial (`@modelcontextprotocol/sdk`
 - [Variables de entorno](#variables-de-entorno)
 - [Sistema de permisos](#sistema-de-permisos)
 - [Tools disponibles](#tools-disponibles)
+- [Prompts guiados](#prompts-guiados)
 - [Recursos MCP](#recursos-mcp)
 - [Flujos recomendados y ejemplos de prompts](#flujos-recomendados-y-ejemplos-de-prompts)
 - [Desarrollo y tests](#desarrollo-y-tests)
@@ -266,6 +279,7 @@ en la raíz del proyecto (se carga con dotenv al arrancar).
 | `SCHEMA_DDL_PERMISSIONS` | — | Igual para DDL. |
 | `MULTI_DB_WRITE_MODE` | `false` | En modo multi-DB, `true` permite escrituras (por defecto se bloquean todas). |
 | `MYSQL_DISABLE_READ_ONLY_TRANSACTIONS` | `false` | `true` desactiva las transacciones READ ONLY en consultas de lectura (no recomendado). |
+| `MYSQL_ELICIT_CONFIRM` | `true` | `false` desactiva la confirmación interactiva (elicitation) antes de acciones destructivas (KILL, ALTER TABLE, recrear procedures). Solo aplica si el cliente soporta elicitation. |
 
 ### Modo remoto
 
@@ -354,6 +368,8 @@ INSERT/UPDATE/DELETE/DDL.
 | `sql` | string | sí | Sentencia SQL a ejecutar. Usa placeholders `?` con `params` en vez de concatenar valores. |
 | `params` | array | no | Valores para los placeholders `?` (prepared statement). Acepta string, number, boolean o null. |
 | `maxRows` | number | no | Máximo de filas a devolver (default 500, máx 5000). Si se trunca, la respuesta lo indica con `truncated: true`. |
+| `allowFullTableWrite` | boolean | no | Obligatorio (`true`) para ejecutar UPDATE/DELETE **sin WHERE**. Por defecto esas escrituras de tabla completa se bloquean como protección. |
+| `dryRun` | boolean | no | `true` ejecuta la escritura en una transacción con ROLLBACK: devuelve los `affectedRows` reales sin aplicar ningún cambio. Ideal para previsualizar UPDATE/DELETE. |
 
 Ejemplo de argumentos:
 
@@ -364,9 +380,13 @@ Ejemplo de argumentos:
 }
 ```
 
-La respuesta estructurada incluye `rows`, `rowCount`, `returnedRows`,
-`truncated` y `durationMs`; en escrituras incluye `operation`,
-`affectedRows`, `insertId` y `changedRows`.
+La respuesta estructurada incluye `rows`, `columns` (nombre y tipo de cada
+columna, para interpretar DECIMAL/DATETIME correctamente), `rowCount`,
+`returnedRows`, `truncated`, `warnings` (los warnings de MySQL por truncado o
+coerción de tipos) y `durationMs`; en escrituras incluye `operation`,
+`affectedRows`, `insertId`, `changedRows` y `dryRun`. Los errores incluyen
+código MySQL, hint de corrección y, si una tabla no existe, sugerencias de
+nombres parecidos.
 
 ### Inspección y análisis
 
@@ -378,18 +398,27 @@ automáticas (full scans, filesort, índices no usados...).
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
 | `sql` | string | sí | Query a analizar (SELECT, UPDATE, DELETE o INSERT). |
-| `format` | string | no | `traditional` (default), `json` (el más rico para análisis automático) o `tree`. |
-| `analyze` | boolean | no | `true` ejecuta además `EXPLAIN ANALYZE`. Solo aplica a SELECT porque ANALYZE ejecuta la query real. Default `false`. |
+| `format` | string | no | `traditional` (default), `json` (el más rico para análisis automático) o `tree` (solo MySQL). |
+| `analyze` | boolean | no | `true` ejecuta además `EXPLAIN ANALYZE` (MariaDB: `ANALYZE FORMAT=JSON`) para comparar filas estimadas vs reales. Solo SELECT porque ejecuta la query real. Default `false`. |
+
+Además del plan, siempre devuelve `issues`: una lista priorizada
+(`critical`/`warning`/`info`) extraída del plan JSON — full scans con filas
+examinadas, filesort, tablas temporales — con sugerencias de índices
+**compuestos** deducidos de las condiciones del WHERE. Detecta el motor
+(MySQL/MariaDB) automáticamente.
 
 #### `mysql_describe`
 
-Estructura completa de una tabla: columnas, índices agrupados, foreign keys,
-estadísticas y el `CREATE TABLE`.
+Estructura completa de una tabla: columnas, índices agrupados, foreign keys
+salientes **y entrantes** (`referencedBy`: qué tablas referencian a esta —
+clave para prever efectos de cascada), triggers de la tabla, CHECK
+constraints, estadísticas y el `CREATE TABLE`.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
-| `table` | string | sí | Tabla a describir. |
+| `table` | string | sí | Tabla a describir. Si no existe, el error sugiere nombres parecidos. |
 | `database` | string | no | Base de datos (usa la actual si se omite). |
+| `includeSampleRows` | boolean | no | `true` incluye hasta 3 filas recientes de ejemplo. Default `false`. |
 
 #### `mysql_data_dictionary`
 
@@ -403,6 +432,14 @@ y un propósito inferido heurísticamente.
 | `table` | string | no | Tabla concreta. Si se omite documenta todas las tablas base. |
 | `format` | string | no | `json` (default, estructurado) o `markdown` (legible). |
 | `sampleRowsLimit` | number | no | Filas de ejemplo por tabla (default 3, 0 desactiva, máx 50). |
+| `maxTables` | number | no | Máximo de tablas a documentar en esta llamada (paginación para bases grandes). |
+| `offsetTables` | number | no | Tablas a saltar (orden alfabético) antes de documentar. Combínalo con `maxTables` para paginar. |
+
+Extras para precisión de la IA: los valores permitidos de columnas ENUM/SET
+se devuelven como lista explícita (`allowedValues`), los índices incluyen su
+cardinalidad (señal de selectividad), y la respuesta incluye un `schemaHash`
+estable — si dos llamadas devuelven el mismo hash, el esquema no cambió.
+Emite notificaciones de progreso por tabla y soporta cancelación.
 
 Ejemplo de argumentos:
 
@@ -447,6 +484,7 @@ referencia, con reglas ON UPDATE/ON DELETE.
 | --- | --- | --- | --- |
 | `database` | string | no | Base a analizar. Si se omite analiza todas. |
 | `table` | string | no | Tabla concreta (muestra relaciones en ambas direcciones). |
+| `format` | string | no | `json` (default, grafo de relaciones) o `mermaid` (diagrama ER `erDiagram` listo para renderizar o razonar sobre él). |
 
 #### `mysql_table_stats`
 
@@ -460,9 +498,11 @@ Estadísticas por tabla: filas estimadas, tamaño de datos e índices formateado
 
 #### `mysql_index_suggestions`
 
-Detecta problemas de indexación: tablas sin primary key, columnas de foreign
-key sin índice (con el `CREATE INDEX` listo para ejecutar) y columnas
-candidatas por convención de nombres (`status`, `*_id`, `email`...).
+Detecta problemas de indexación priorizados: tablas sin primary key,
+columnas de foreign key sin índice (con el `CREATE INDEX` listo para
+ejecutar), **índices redundantes** (prefijo de otro índice, con el `DROP
+INDEX` sugerido), **índices sin uso real** (desde `sys.schema_unused_indexes`
+cuando está disponible) y columnas candidatas por convención de nombres.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -471,20 +511,28 @@ candidatas por convención de nombres (`status`, `*_id`, `email`...).
 #### `mysql_process_list`
 
 Procesos y queries en ejecución, con análisis: activos vs durmiendo, queries
-de más de 30 segundos, agrupación por usuario y comando.
+de más de 30 segundos, agrupación por usuario y comando. Incluye además las
+**transacciones InnoDB activas** (`innodbTransactions`: antigüedad, filas
+bloqueadas y modificadas) — lo primero que mirar ante bloqueos.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
-| `full` | boolean | no | `true` muestra el texto completo de cada query. Default `false`. |
+| `full` | boolean | no | `true` muestra el texto completo de cada query (default: truncado a 120 caracteres). |
+| `user` | string | no | Filtrar por usuario MySQL. |
+| `db` | string | no | Filtrar por base de datos. |
+| `minTime` | number | no | Solo procesos que lleven al menos estos segundos ejecutándose. |
 
 #### `mysql_query_history`
 
 Historial en memoria de la sesión: SQL ejecutado, duración, filas y éxito o
-error de cada consulta y tool.
+error de cada consulta y tool. Incluye `stats` agregadas: total, errores,
+duración media y las 5 queries más lentas — útil para que la IA revise su
+propia sesión.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
 | `limit` | number | no | Número de entradas recientes (default 50, máx 100). |
+| `onlyErrors` | boolean | no | `true` devuelve solo las consultas fallidas. |
 | `clear` | boolean | no | `true` borra el historial en vez de devolverlo. |
 
 #### `mysql_variables`
@@ -504,16 +552,18 @@ una variable (esto último requiere `ALLOW_ADMIN_OPERATION=true`).
 
 #### `mysql_backup`
 
-Exporta los datos de una tabla a JSON o CSV, con filtro WHERE y límite de
-filas opcionales.
+Exporta los datos de una tabla a JSON, CSV o SQL (INSERTs listos para
+reproducir), con filtro WHERE, selección de columnas y límite opcionales.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
-| `table` | string | sí | Tabla a exportar. |
-| `format` | string | no | `json` (default) o `csv`. |
+| `table` | string | sí | Tabla a exportar. Si no existe, el error sugiere nombres parecidos. |
+| `format` | string | no | `json` (default), `csv` o `sql` (sentencias INSERT). |
 | `database` | string | no | Base de datos. |
+| `columns` | array | no | Columnas a exportar (default: todas). Evita `SELECT *` en tablas anchas. |
 | `whereClause` | string | no | Condiciones sin la palabra `WHERE` (ej. `status = 'activo' AND created_at > '2026-01-01'`). |
 | `limit` | number | no | Máximo de filas (entero positivo). |
+| `outputFile` | string | no | Si se indica, escribe el export a ese archivo y devuelve un resumen (filas, bytes, ruta) en vez de volcar los datos al contexto. |
 
 #### `mysql_export_schema`
 
@@ -548,8 +598,11 @@ db-schema/
 #### `mysql_compare_schemas`
 
 Compara la estructura de dos bases: tablas que solo existen en una, columnas
-distintas (tipo/nulabilidad) e índices distintos (columnas/unicidad). Útil
-para detectar drift entre entornos (dev vs prod).
+distintas (tipo/nulabilidad, con `severity: breaking|safe`), índices
+distintos (columnas/unicidad), opciones de tabla (engine, collation) y
+**rutinas/vistas/triggers** comparados por hash de definición
+(`objectDifferences`). Útil para detectar drift entre entornos (dev vs
+prod).
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -560,7 +613,9 @@ para detectar drift entre entornos (dev vs prod).
 
 Genera un script SQL de migración para que la base destino iguale a la
 origen: `CREATE TABLE` de tablas faltantes, `ALTER TABLE` de columnas y
-`DROP` comentados por seguridad. Revísalo siempre antes de ejecutarlo.
+`DROP` comentados por seguridad. Marca explícitamente las operaciones con
+posible **pérdida de datos** (⚠️) e incluye al final la **migración inversa
+(DOWN)** para revertir los cambios. Revísalo siempre antes de ejecutarlo.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
@@ -571,23 +626,25 @@ origen: `CREATE TABLE` de tablas faltantes, `ALTER TABLE` de columnas y
 
 #### `mysql_call_procedure`
 
-Ejecuta un stored procedure con `CALL`, incluyendo procedimientos con
-parámetros de salida.
+Ejecuta un stored procedure con `CALL`. Antes de ejecutar **lee la firma
+real** desde `information_schema.parameters`: valida el número de valores de
+entrada (con mensaje que muestra la firma completa si no coinciden) y
+**detecta y devuelve automáticamente los parámetros OUT/INOUT** en el orden
+declarado.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
-| `procedureName` | string | sí | Nombre del procedure. |
-| `params` | array | no | Valores IN en el orden que define el procedure. |
-| `outParams` | array | no | Nombres para los parámetros OUT/INOUT. Se pasan como variables `@nombre` después de los IN y se devuelven tras la llamada. |
+| `procedureName` | string | sí | Nombre del procedure. Si no existe, el error sugiere nombres parecidos. |
+| `params` | array | no | Un valor por cada parámetro IN/INOUT, en el orden declarado. |
+| `outParams` | array | no | Solo necesario si la firma no es legible desde `information_schema`: nombres para variables OUT añadidas tras los IN. |
 | `database` | string | no | Base donde existe el procedure. |
 
-Ejemplo con OUT:
+Ejemplo (los OUT se detectan solos):
 
 ```json
 {
   "procedureName": "SP_CONTAR_PEDIDOS",
-  "params": [42],
-  "outParams": ["total"]
+  "params": [42]
 }
 ```
 
@@ -636,17 +693,32 @@ Requieren `ALLOW_ADMIN_OPERATION=true`.
 #### `mysql_kill_process`
 
 Termina un proceso o consulta de MySQL. Obtén el ID con
-`mysql_process_list`.
+`mysql_process_list`. Si el cliente soporta elicitation, pide confirmación
+humana antes de ejecutar (desactivable con `MYSQL_ELICIT_CONFIRM=false`); lo
+mismo aplica a `mysql_alter_table` y `mysql_alter_procedure`.
 
 | Parámetro | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
 | `processId` | number | sí | ID del proceso (entero positivo). |
 | `mode` | string | no | `connection` (default, cierra la conexión entera) o `query` (aborta solo la sentencia en ejecución). |
 
+## Prompts guiados
+
+El servidor registra prompts MCP que encadenan las tools en el orden
+correcto (en Claude aparecen como comandos/plantillas; los argumentos de
+base de datos tienen autocompletado):
+
+| Prompt | Argumentos | Qué hace |
+| --- | --- | --- |
+| `analyze-database` | `database` | Analiza una base completa: diccionario de datos en markdown, diagrama de relaciones en Mermaid y estadísticas, con resumen de entidades y problemas de diseño. |
+| `optimize-query` | `sql` | Diagnóstico de una query lenta: EXPLAIN en JSON con issues priorizados, revisión de índices y propuesta de query optimizada con los `CREATE INDEX` exactos. |
+| `safe-migration` | `sourceDb`, `targetDb` | Compara dos bases, genera el script de migración (con sección DOWN), señala los cambios con riesgo de pérdida de datos y pide confirmación antes de aplicar nada. |
+
 ## Recursos MCP
 
-Además de tools, el servidor expone recursos navegables (útiles en clientes
-que soportan resources):
+Además de tools, el servidor expone recursos navegables con **autocompletado
+de variables** (al escribir `mysql://tables/mi_base/...` el cliente puede
+autocompletar bases, tablas y nombres de rutinas):
 
 | URI | Contenido |
 | --- | --- |
