@@ -112,7 +112,6 @@ Uso típico:
 
 - `mysql_variables`: muestra o cambia variables de MySQL.
 - `mysql_kill_process`: mata un proceso por ID.
-- `mysql_import`: importa un arreglo JSON a una tabla.
 
 ## Tools de documentación para IA
 

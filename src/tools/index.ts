@@ -1135,98 +1135,6 @@ async function getTableSampleRows(
 }
 
 // ============================================================================
-// TOOL: mysql_import - Import data from JSON
-// ============================================================================
-
-export async function mysqlImport(
-  table: string,
-  data: any[],
-  database?: string,
-  mode: "insert" | "replace" | "upsert" = "insert",
-): Promise<{
-  content: Array<{ type: string; text: string }>;
-  isError: boolean;
-}> {
-  try {
-    if (!Array.isArray(data) || data.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Error: Data must be a non-empty array of objects",
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    const fullTableName = database
-      ? `\`${database}\`.\`${table}\``
-      : `\`${table}\``;
-    const columns = Object.keys(data[0]);
-    const pool = await getPool();
-    const connection = await pool.getConnection();
-
-    try {
-      await connection.beginTransaction();
-
-      let insertedCount = 0;
-      for (const row of data) {
-        const values = columns.map((col) => row[col]);
-        const placeholders = columns.map(() => "?").join(", ");
-        const columnList = columns.map((c) => `\`${c}\``).join(", ");
-
-        let sql: string;
-        switch (mode) {
-          case "replace":
-            sql = `REPLACE INTO ${fullTableName} (${columnList}) VALUES (${placeholders})`;
-            break;
-          case "upsert":
-            const updateClause = columns
-              .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
-              .join(", ");
-            sql = `INSERT INTO ${fullTableName} (${columnList}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateClause}`;
-            break;
-          default:
-            sql = `INSERT INTO ${fullTableName} (${columnList}) VALUES (${placeholders})`;
-        }
-
-        await connection.query(sql, values);
-        insertedCount++;
-      }
-
-      await connection.commit();
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Successfully imported ${insertedCount} rows into ${table} using ${mode} mode`,
-          },
-        ],
-        isError: false,
-      };
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
-  } catch (error) {
-    log("error", "Error in mysql_import:", error);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      ],
-      isError: true,
-    };
-  }
-}
-
-// ============================================================================
 // TOOL: mysql_compare_schemas - Compare two database schemas
 // ============================================================================
 
@@ -3159,38 +3067,6 @@ export const additionalToolDefinitions = [
     },
   },
   {
-    name: "mysql_import",
-    description:
-      "Import data from a JSON array into a table. Use this tool to bulk insert data, restore backups, or sync data. Supports three modes: 'insert' (adds new rows), 'replace' (replaces existing rows with same primary key), and 'upsert' (inserts new or updates existing based on primary key). All operations run in a transaction for data integrity.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        table: {
-          type: "string",
-          description: "Target table name where data will be imported",
-        },
-        data: {
-          type: "array",
-          items: { type: "object", additionalProperties: true },
-          description:
-            'Array of objects to import. Each object should have keys matching table column names. Example: [{"id": 1, "name": "John"}, {"id": 2, "name": "Jane"}]',
-        },
-        database: {
-          type: "string",
-          description:
-            "Database name (optional, uses current database if not specified)",
-        },
-        mode: {
-          type: "string",
-          enum: ["insert", "replace", "upsert"],
-          description:
-            "Import mode: 'insert' (default, adds new rows only), 'replace' (replaces existing rows with same primary/unique key), 'upsert' (inserts new rows or updates existing ones using ON DUPLICATE KEY UPDATE)",
-        },
-      },
-      required: ["table", "data"],
-    },
-  },
-  {
     name: "mysql_compare_schemas",
     description:
       "Compare the structure (schema) between two databases and identify differences. Use this tool to find missing tables, different column definitions, or schema drift between environments (dev vs prod, staging vs production, etc.). Returns detailed comparison showing tables only in source, tables only in target, and column differences in common tables.",
@@ -3651,9 +3527,6 @@ export async function handleAdditionalTool(
         args.outputDir || args.outputPath,
         args.includeDatabaseStatement,
       );
-
-    case "mysql_import":
-      return mysqlImport(args.table, args.data, args.database, args.mode);
 
     case "mysql_compare_schemas":
       return mysqlCompareSchemas(args.sourceDb, args.targetDb);
